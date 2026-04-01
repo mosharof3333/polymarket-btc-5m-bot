@@ -12,6 +12,7 @@ PRINT_PRICE_EVERY = 8
 
 MAX_FLIPS = 4
 SELL_AT_SECONDS = 294  # 4.9 minutes into window
+STOP_LOSS_PRICE = 0.45  # Stop loss on last flip position
 
 class BotState:
     def __init__(self):
@@ -327,7 +328,23 @@ async def main():
                     save_state(state)
                     print(f"🔄 FLIP DOWN {new_shares} @ {down_ask:.4f} | Cost ${cost:.2f} | Capital ${state.capital:.2f} | Flip {state.flip_count}/{MAX_FLIPS}")
             elif state.current_side == "up" and state.flip_count >= MAX_FLIPS:
-                pass  # Max flips reached, hold and wait for resolution
+                if up_ask <= STOP_LOSS_PRICE:
+                    up_bid = await get_best_bid(session, up_token)
+                    down_bid = await get_best_bid(session, down_token)
+                    proceeds = (state.up_shares * up_bid) + (state.down_shares * down_bid)
+                    total_cost = state.up_cost + state.down_cost
+                    net_pnl = proceeds - total_cost
+                    old_capital = state.capital
+                    state.capital += proceeds
+                    state.force_sold = True
+                    pnl_str = f"+${net_pnl:.2f}" if net_pnl >= 0 else f"-${abs(net_pnl):.2f}"
+                    print(f"🛑 STOP LOSS UP @ {up_ask:.4f} | UP {state.up_shares:.0f} @ {up_bid:.4f} | DOWN {state.down_shares:.0f} @ {down_bid:.4f}")
+                    print(f"   Proceeds: ${proceeds:.2f} | Cost: ${total_cost:.2f} | LOSS {pnl_str}")
+                    print(f"   Capital: ${old_capital:.2f} → ${state.capital:.2f}")
+                    state.up_shares = state.down_shares = 0.0
+                    state.up_cost = state.down_cost = 0.0
+                    state.current_side = None
+                    save_state(state)
 
             elif state.current_side == "down" and up_ask >= 0.60 and state.flip_count < MAX_FLIPS:
                 new_shares = int(state.last_buy_size * 2)
@@ -350,7 +367,23 @@ async def main():
                     save_state(state)
                     print(f"🔄 FLIP UP {new_shares} @ {up_ask:.4f} | Cost ${cost:.2f} | Capital ${state.capital:.2f} | Flip {state.flip_count}/{MAX_FLIPS}")
             elif state.current_side == "down" and state.flip_count >= MAX_FLIPS:
-                pass  # Max flips reached, hold and wait for resolution
+                if down_ask <= STOP_LOSS_PRICE:
+                    up_bid = await get_best_bid(session, up_token)
+                    down_bid = await get_best_bid(session, down_token)
+                    proceeds = (state.up_shares * up_bid) + (state.down_shares * down_bid)
+                    total_cost = state.up_cost + state.down_cost
+                    net_pnl = proceeds - total_cost
+                    old_capital = state.capital
+                    state.capital += proceeds
+                    state.force_sold = True
+                    pnl_str = f"+${net_pnl:.2f}" if net_pnl >= 0 else f"-${abs(net_pnl):.2f}"
+                    print(f"🛑 STOP LOSS DOWN @ {down_ask:.4f} | UP {state.up_shares:.0f} @ {up_bid:.4f} | DOWN {state.down_shares:.0f} @ {down_bid:.4f}")
+                    print(f"   Proceeds: ${proceeds:.2f} | Cost: ${total_cost:.2f} | LOSS {pnl_str}")
+                    print(f"   Capital: ${old_capital:.2f} → ${state.capital:.2f}")
+                    state.up_shares = state.down_shares = 0.0
+                    state.up_cost = state.down_cost = 0.0
+                    state.current_side = None
+                    save_state(state)
 
             await asyncio.sleep(POLL_INTERVAL)
 
