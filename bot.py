@@ -77,7 +77,7 @@ async def get_best_ask(session, token_id):
 
 async def main():
     state = load_state()
-    print(f"🚀 BTC 5m Doubling Bot — NOW DETECTS WIN AT 0.99+ IMMEDIATELY")
+    print(f"🚀 BTC 5m Doubling Bot — Syntax fixed + immediate 0.99 win detection")
 
     async with aiohttp.ClientSession() as session:
         while True:
@@ -110,7 +110,7 @@ async def main():
             up_token = clob_ids[0] if clob_ids else None
             down_token = clob_ids[1] if len(clob_ids) > 1 else None
 
-            # === IMMEDIATE WIN DETECTION at 0.99+ ===
+            # Immediate win detection when side reaches 0.99+
             resolved = False
             up_final = 0.5
             down_final = 0.5
@@ -146,10 +146,10 @@ async def main():
                 print(f"   Capital: ${old_capital:.2f} → ${state.capital:.2f}")
 
                 await asyncio.sleep(3)
-                state.last_window_ts = None  # Force next window reset
+                state.last_window_ts = None
                 continue
 
-            # Live prices (tick-level)
+            # Live prices
             up_ask = await get_best_ask(session, up_token)
             down_ask = await get_best_ask(session, down_token)
 
