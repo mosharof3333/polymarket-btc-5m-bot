@@ -3,22 +3,22 @@ import aiohttp
 import json
 import time
 import os
-from datetime import datetime
 
 STATE_FILE = "bot_state.json"
 BASE_SHARES = 10
-POLL_INTERVAL = 0.2                # 200ms = millisecond reaction speed
+POLL_INTERVAL = 0.15          # 150ms — very aggressive for millisecond reaction
+CLOB_BASE = "https://clob.polymarket.com"
 
 class BotState:
     def __init__(self):
         self.capital = 1000.0
         self.last_window_ts = None
-        self.current_side = None      # 'up' or 'down' or None
+        self.current_side = None      # 'up' or 'down'
         self.up_shares = 0.0
         self.down_shares = 0.0
         self.up_cost = 0.0
         self.down_cost = 0.0
-        self.last_buy_size = 0.0      # for doubling on flips
+        self.last_buy_size = 0.0
 
 def load_state():
     if os.path.exists(STATE_FILE):
@@ -50,78 +50,85 @@ def save_state(state):
     with open(STATE_FILE, "w") as f:
         json.dump(data, f, indent=2)
 
-async def fetch_event(session, slug):
+async def fetch_gamma(session, slug):
     url = f"https://gamma-api.polymarket.com/events?slug={slug}"
     try:
-        async with session.get(url, timeout=5) as resp:
+        async with session.get(url, timeout=3) as resp:
             if resp.status == 200:
                 return await resp.json()
     except:
         pass
     return None
 
-def get_prices_and_status(event_data):
-    if not event_data or not isinstance(event_data, list) or len(event_data) == 0:
-        return None, None, None, True
-    event = event_data[0]
-    market = event.get("markets", [event])[0]
-    closed = market.get("closed", event.get("closed", False))
-    
-    # outcomePrices for live price (exactly as Polymarket shows)
-    if "outcomePrices" in market:
-        prices_str = json.loads(market["outcomePrices"])
-        up_price = float(prices_str[0])
-        down_price = float(prices_str[1])
-    else:
-        up_price = down_price = 0.5
-    
-    return up_price, down_price, closed
+async def get_best_ask(session, token_id):
+    """Get best ASK price (what you pay to BUY shares) — tick level"""
+    if not token_id:
+        return 0.5
+    url = f"{CLOB_BASE}/price?token_id={token_id}&side=SELL"  # SELL side price = ask for buyer
+    try:
+        async with session.get(url, timeout=2) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                return float(data.get("price", 0.5))
+    except:
+        pass
+    return 0.5
 
 async def main():
     state = load_state()
-    print(f"🚀 BTC 5m Doubling Bot started | Capital: ${state.capital:.2f} | Polling every 200ms")
+    print(f"🚀 BTC 5m TICK-LEVEL Doubling Bot started | Capital: ${state.capital:.2f} | Polling 150ms")
     
     async with aiohttp.ClientSession() as session:
         while True:
             now_ts = (int(time.time()) // 300) * 300
             slug = f"btc-updown-5m-{now_ts}"
             
-            event_data = await fetch_event(session, slug)
-            if not event_data:
+            event_data = await fetch_gamma(session, slug)
+            if not event_data or not event_data:
                 await asyncio.sleep(POLL_INTERVAL)
                 continue
             
-            up_price, down_price, closed = get_prices_and_status(event_data)
+            # Get clobTokenIds
+            market = event_data[0].get("markets", [event_data[0]])[0]
+            closed = market.get("closed", False)
+            clob_str = market.get("clobTokenIds", "[]")
+            if isinstance(clob_str, str):
+                clob_ids = json.loads(clob_str)
+            else:
+                clob_ids = clob_str
+            up_token = clob_ids[0] if clob_ids else None
+            down_token = clob_ids[1] if len(clob_ids) > 1 else None
             
-            # New window → reset positions but keep capital
+            # New window reset
             if now_ts != state.last_window_ts:
                 if state.last_window_ts is not None:
-                    print(f"✅ Window {state.last_window_ts} ended. Capital now: ${state.capital:.2f}")
+                    print(f"✅ Window ended. Capital: ${state.capital:.2f}")
                 state.last_window_ts = now_ts
                 state.current_side = None
                 state.up_shares = state.down_shares = 0.0
                 state.up_cost = state.down_cost = 0.0
                 state.last_buy_size = 0.0
                 save_state(state)
-                print(f"🌟 NEW 5m WINDOW: {slug} | Up {up_price:.3f} / Down {down_price:.3f}")
+                print(f"🌟 NEW WINDOW: {slug}")
             
             if closed:
-                # Resolve P&L - one side must be \~1.0
-                up_wins = up_price >= 0.999
-                winning_shares = state.up_shares if up_wins else state.down_shares
-                payout = winning_shares * 1.0
+                up_price = 1.0 if market.get("outcomePrices") and json.loads(market["outcomePrices"])[0] >= 0.999 else 0.0
+                payout = state.up_shares if up_price >= 0.999 else state.down_shares
                 state.capital += payout
                 save_state(state)
-                print(f"🏁 WINDOW RESOLVED → {'UP' if up_wins else 'DOWN'} wins | Payout ${payout:.2f} | New Capital ${state.capital:.2f}")
+                print(f"🏁 RESOLVED — {'UP' if up_price >= 0.999 else 'DOWN'} wins | Payout ${payout:.2f} | Capital ${state.capital:.2f}")
                 await asyncio.sleep(2)
                 continue
             
-            # === YOUR DOUBLING STRATEGY ===
+            # Fast tick prices (best ask)
+            up_ask = await get_best_ask(session, up_token)
+            down_ask = await get_best_ask(session, down_token)
+            
+            # === STRATEGY: Tick-level triggers + doubling ===
             if state.current_side is None:
-                # First entry: 10 shares on whichever hits 60¢ first
-                if up_price >= 0.60:
+                if up_ask >= 0.60:
                     shares = BASE_SHARES
-                    cost = shares * up_price
+                    cost = shares * up_ask
                     if state.capital >= cost:
                         state.up_shares += shares
                         state.up_cost += cost
@@ -129,10 +136,10 @@ async def main():
                         state.current_side = "up"
                         state.last_buy_size = shares
                         save_state(state)
-                        print(f"📈 FIRST BUY → UP {shares} shares @ {up_price:.3f} | Cost ${cost:.2f} | Capital ${state.capital:.2f}")
-                elif down_price >= 0.60:
+                        print(f"📈 FIRST BUY UP {shares} @ {up_ask:.4f} | Cost ${cost:.2f} | Capital ${state.capital:.2f}")
+                elif down_ask >= 0.60:
                     shares = BASE_SHARES
-                    cost = shares * down_price
+                    cost = shares * down_ask
                     if state.capital >= cost:
                         state.down_shares += shares
                         state.down_cost += cost
@@ -140,35 +147,31 @@ async def main():
                         state.current_side = "down"
                         state.last_buy_size = shares
                         save_state(state)
-                        print(f"📉 FIRST BUY → DOWN {shares} shares @ {down_price:.3f} | Cost ${cost:.2f} | Capital ${state.capital:.2f}")
+                        print(f"📉 FIRST BUY DOWN {shares} @ {down_ask:.4f} | Cost ${cost:.2f} | Capital ${state.capital:.2f}")
             
-            elif state.current_side == "up":
-                # Reversal: Down now ≥60¢ → double up on Down
-                if down_price >= 0.60:
-                    new_shares = int(state.last_buy_size * 2)
-                    cost = new_shares * down_price
-                    if state.capital >= cost:
-                        state.down_shares += new_shares
-                        state.down_cost += cost
-                        state.capital -= cost
-                        state.current_side = "down"
-                        state.last_buy_size = new_shares
-                        save_state(state)
-                        print(f"🔄 FLIP → DOWN {new_shares} shares @ {down_price:.3f} | Cost ${cost:.2f} | Capital ${state.capital:.2f} | (next double = {new_shares*2})")
+            elif state.current_side == "up" and down_ask >= 0.60:
+                new_shares = int(state.last_buy_size * 2)
+                cost = new_shares * down_ask
+                if state.capital >= cost:
+                    state.down_shares += new_shares
+                    state.down_cost += cost
+                    state.capital -= cost
+                    state.current_side = "down"
+                    state.last_buy_size = new_shares
+                    save_state(state)
+                    print(f"🔄 FLIP DOWN {new_shares} @ {down_ask:.4f} | Cost ${cost:.2f} | Capital ${state.capital:.2f} (next: {new_shares*2})")
             
-            elif state.current_side == "down":
-                # Reversal: Up now ≥60¢ → double up on Up
-                if up_price >= 0.60:
-                    new_shares = int(state.last_buy_size * 2)
-                    cost = new_shares * up_price
-                    if state.capital >= cost:
-                        state.up_shares += new_shares
-                        state.up_cost += cost
-                        state.capital -= cost
-                        state.current_side = "up"
-                        state.last_buy_size = new_shares
-                        save_state(state)
-                        print(f"🔄 FLIP → UP {new_shares} shares @ {up_price:.3f} | Cost ${cost:.2f} | Capital ${state.capital:.2f} | (next double = {new_shares*2})")
+            elif state.current_side == "down" and up_ask >= 0.60:
+                new_shares = int(state.last_buy_size * 2)
+                cost = new_shares * up_ask
+                if state.capital >= cost:
+                    state.up_shares += new_shares
+                    state.up_cost += cost
+                    state.capital -= cost
+                    state.current_side = "up"
+                    state.last_buy_size = new_shares
+                    save_state(state)
+                    print(f"🔄 FLIP UP {new_shares} @ {up_ask:.4f} | Cost ${cost:.2f} | Capital ${state.capital:.2f} (next: {new_shares*2})")
             
             await asyncio.sleep(POLL_INTERVAL)
 
