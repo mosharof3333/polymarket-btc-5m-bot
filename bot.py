@@ -141,7 +141,7 @@ async def main():
                 save_state(state)
 
                 result = "WIN" if payout > 0 else "LOSS"
-                pnl_str = f"+\( {payout:.2f}" if payout > 0 else f"- \){(old_capital - state.capital):.2f}"
+                pnl_str = f"+${payout:.2f}" if payout > 0 else f"-${(old_capital - state.capital):.2f}"
 
                 print(f"🏁 WINDOW RESOLVED (side hit 0.99+)!")
                 print(f"   UP shares: {state.up_shares:.0f} | DOWN shares: {state.down_shares:.0f}")
