@@ -100,17 +100,24 @@ async def main():
                             if up_final >= 0.99:
                                 winner = "UP"
                                 payout = state.up_shares * 1.0
-                            else:
+                            elif down_final >= 0.99:
                                 winner = "DOWN"
                                 payout = state.down_shares * 1.0
-                            total_cost = state.up_cost + state.down_cost
-                            net_pnl = payout - total_cost
-                            old_capital = state.capital
-                            state.capital += payout
-                            result = "WIN" if net_pnl > 0 else "LOSS"
-                            pnl_str = f"+${net_pnl:.2f}" if net_pnl >= 0 else f"-${abs(net_pnl):.2f}"
-                            print(f"📊 PREV WINDOW SETTLED ({winner} wins) | {result} {pnl_str} | Capital: ${old_capital:.2f} → ${state.capital:.2f}")
-                            settled = True
+                            else:
+                                # Market not settled yet, skip — will retry next loop
+                                payout = None
+                            if payout is not None:
+                                total_cost = state.up_cost + state.down_cost
+                                net_pnl = payout - total_cost
+                                old_capital = state.capital
+                                state.capital += payout
+                                result = "WIN" if net_pnl > 0 else "LOSS"
+                                pnl_str = f"+${net_pnl:.2f}" if net_pnl >= 0 else f"-${abs(net_pnl):.2f}"
+                                print(f"📊 PREV WINDOW SETTLED ({winner} wins)")
+                                print(f"   UP shares: {state.up_shares:.0f} | DOWN shares: {state.down_shares:.0f}")
+                                print(f"   Payout: ${payout:.2f} | Total cost: ${total_cost:.2f} | {result} {pnl_str}")
+                                print(f"   Capital: ${old_capital:.2f} → ${state.capital:.2f}")
+                                settled = True
                         except:
                             pass
                     if not settled:
