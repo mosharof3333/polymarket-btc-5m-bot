@@ -287,6 +287,14 @@ async def main():
                 new_shares = int(state.last_buy_size * 2)
                 cost = new_shares * down_ask
                 if state.capital >= cost:
+                    # Sell previous UP position first
+                    up_bid = await get_best_bid(session, up_token)
+                    sell_proceeds = state.up_shares * up_bid
+                    state.capital += sell_proceeds
+                    print(f"💸 SELL UP {state.up_shares:.0f} @ {up_bid:.4f} | Proceeds ${sell_proceeds:.2f}")
+                    state.up_shares = 0.0
+                    state.up_cost = 0.0
+                    # Buy new DOWN position
                     state.down_shares += new_shares
                     state.down_cost += cost
                     state.capital -= cost
@@ -302,6 +310,14 @@ async def main():
                 new_shares = int(state.last_buy_size * 2)
                 cost = new_shares * up_ask
                 if state.capital >= cost:
+                    # Sell previous DOWN position first
+                    down_bid = await get_best_bid(session, down_token)
+                    sell_proceeds = state.down_shares * down_bid
+                    state.capital += sell_proceeds
+                    print(f"💸 SELL DOWN {state.down_shares:.0f} @ {down_bid:.4f} | Proceeds ${sell_proceeds:.2f}")
+                    state.down_shares = 0.0
+                    state.down_cost = 0.0
+                    # Buy new UP position
                     state.up_shares += new_shares
                     state.up_cost += cost
                     state.capital -= cost
