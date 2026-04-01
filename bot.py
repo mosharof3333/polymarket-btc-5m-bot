@@ -134,14 +134,17 @@ async def main():
                     winner = "DOWN"
                     payout = state.down_shares * 1.0
 
+                total_cost = state.up_cost + state.down_cost
+                net_pnl = payout - total_cost
+
                 old_capital = state.capital
                 state.capital += payout
-                
+
                 # Save the new capital FIRST
                 save_state(state)
 
-                result = "WIN" if payout > 0 else "LOSS"
-                pnl_str = f"+${payout:.2f}" if payout > 0 else f"-${(old_capital - state.capital):.2f}"
+                result = "WIN" if net_pnl > 0 else "LOSS"
+                pnl_str = f"+${net_pnl:.2f}" if net_pnl >= 0 else f"-${abs(net_pnl):.2f}"
 
                 print(f"🏁 WINDOW RESOLVED (side hit 0.99+)!")
                 print(f"   UP shares: {state.up_shares:.0f} | DOWN shares: {state.down_shares:.0f}")
