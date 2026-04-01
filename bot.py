@@ -10,6 +10,9 @@ POLL_INTERVAL = 0.15
 CLOB_BASE = "https://clob.polymarket.com"
 PRINT_PRICE_EVERY = 8
 
+MAX_FLIPS = 4
+SELL_AT_SECONDS = 294  # 4.9 minutes into window
+
 class BotState:
     def __init__(self):
         self.capital = 1000.0
@@ -21,6 +24,8 @@ class BotState:
         self.down_cost = 0.0
         self.last_buy_size = 0.0
         self.poll_count = 0
+        self.flip_count = 0
+        self.force_sold = False
 
 def load_state():
     if os.path.exists(STATE_FILE):
@@ -35,6 +40,8 @@ def load_state():
             state.up_cost = data.get("up_cost", 0.0)
             state.down_cost = data.get("down_cost", 0.0)
             state.last_buy_size = data.get("last_buy_size", 0.0)
+            state.flip_count = data.get("flip_count", 0)
+            state.force_sold = data.get("force_sold", False)
             return state
     return BotState()
 
@@ -48,6 +55,8 @@ def save_state(state):
         "up_cost": state.up_cost,
         "down_cost": state.down_cost,
         "last_buy_size": state.last_buy_size,
+        "flip_count": state.flip_count,
+        "force_sold": state.force_sold,
     }
     with open(STATE_FILE, "w") as f:
         json.dump(data, f, indent=2)
@@ -74,6 +83,19 @@ async def get_best_ask(session, token_id):
     except:
         pass
     return 0.5
+
+async def get_best_bid(session, token_id):
+    if not token_id:
+        return 0.01
+    url = f"{CLOB_BASE}/price?token_id={token_id}&side=BUY"
+    try:
+        async with session.get(url, timeout=2) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                return float(data.get("price", 0.01))
+    except:
+        pass
+    return 0.01
 
 async def main():
     state = load_state()
@@ -130,6 +152,8 @@ async def main():
                 state.up_cost = state.down_cost = 0.0
                 state.last_buy_size = 0.0
                 state.poll_count = 0
+                state.flip_count = 0
+                state.force_sold = False
                 save_state(state)
                 print(f"🌟 NEW WINDOW: {slug}")
 
@@ -193,6 +217,8 @@ async def main():
                 state.up_cost = state.down_cost = 0.0
                 state.current_side = None
                 state.last_buy_size = 0.0
+                state.flip_count = 0
+                state.force_sold = False
                 state.last_window_ts = None  # Force fresh next window
                 save_state(state)
 
@@ -209,8 +235,31 @@ async def main():
                 side_status = f" | Holding {state.current_side.upper()}" if state.current_side else ""
                 print(f"LIVE: Up {up_ask:.4f} | Down {down_ask:.4f}{side_status} | Capital ${state.capital:.2f}")
 
-            # Your strategy (10 → double on flips)
-            if state.current_side is None:
+            # Forced sell at 4.9 minutes
+            elapsed = int(time.time()) - state.last_window_ts
+            if elapsed >= SELL_AT_SECONDS and not state.force_sold and (state.up_shares > 0 or state.down_shares > 0):
+                up_bid = await get_best_bid(session, up_token)
+                down_bid = await get_best_bid(session, down_token)
+                proceeds = (state.up_shares * min(up_bid, 0.99)) + (state.down_shares * min(down_bid, 0.99))
+                total_cost = state.up_cost + state.down_cost
+                net_pnl = proceeds - total_cost
+                old_capital = state.capital
+                state.capital += proceeds
+                state.force_sold = True
+                result = "WIN" if net_pnl > 0 else "LOSS"
+                pnl_str = f"+${net_pnl:.2f}" if net_pnl >= 0 else f"-${abs(net_pnl):.2f}"
+                print(f"⏱️  4.9 MIN FORCED SELL | UP {state.up_shares:.0f} @ {up_bid:.4f} | DOWN {state.down_shares:.0f} @ {down_bid:.4f}")
+                print(f"   Proceeds: ${proceeds:.2f} | Cost: ${total_cost:.2f} | {result} {pnl_str}")
+                print(f"   Capital: ${old_capital:.2f} → ${state.capital:.2f}")
+                state.up_shares = state.down_shares = 0.0
+                state.up_cost = state.down_cost = 0.0
+                state.current_side = None
+                save_state(state)
+                await asyncio.sleep(POLL_INTERVAL)
+                continue
+
+            # Your strategy (10 → double on flips, max 4 flips)
+            if state.current_side is None and not state.force_sold:
                 if up_ask >= 0.60:
                     shares = BASE_SHARES
                     cost = shares * up_ask
@@ -234,7 +283,7 @@ async def main():
                         save_state(state)
                         print(f"📉 FIRST BUY DOWN {shares} @ {down_ask:.4f} | Cost ${cost:.2f} | Capital ${state.capital:.2f}")
 
-            elif state.current_side == "up" and down_ask >= 0.60:
+            elif state.current_side == "up" and down_ask >= 0.60 and state.flip_count < MAX_FLIPS:
                 new_shares = int(state.last_buy_size * 2)
                 cost = new_shares * down_ask
                 if state.capital >= cost:
@@ -243,10 +292,13 @@ async def main():
                     state.capital -= cost
                     state.current_side = "down"
                     state.last_buy_size = new_shares
+                    state.flip_count += 1
                     save_state(state)
-                    print(f"🔄 FLIP DOWN {new_shares} @ {down_ask:.4f} | Cost ${cost:.2f} | Capital ${state.capital:.2f} (next: {new_shares*2})")
+                    print(f"🔄 FLIP DOWN {new_shares} @ {down_ask:.4f} | Cost ${cost:.2f} | Capital ${state.capital:.2f} | Flip {state.flip_count}/{MAX_FLIPS}")
+            elif state.current_side == "up" and state.flip_count >= MAX_FLIPS:
+                pass  # Max flips reached, hold and wait for resolution
 
-            elif state.current_side == "down" and up_ask >= 0.60:
+            elif state.current_side == "down" and up_ask >= 0.60 and state.flip_count < MAX_FLIPS:
                 new_shares = int(state.last_buy_size * 2)
                 cost = new_shares * up_ask
                 if state.capital >= cost:
@@ -255,8 +307,11 @@ async def main():
                     state.capital -= cost
                     state.current_side = "up"
                     state.last_buy_size = new_shares
+                    state.flip_count += 1
                     save_state(state)
-                    print(f"🔄 FLIP UP {new_shares} @ {up_ask:.4f} | Cost ${cost:.2f} | Capital ${state.capital:.2f} (next: {new_shares*2})")
+                    print(f"🔄 FLIP UP {new_shares} @ {up_ask:.4f} | Cost ${cost:.2f} | Capital ${state.capital:.2f} | Flip {state.flip_count}/{MAX_FLIPS}")
+            elif state.current_side == "down" and state.flip_count >= MAX_FLIPS:
+                pass  # Max flips reached, hold and wait for resolution
 
             await asyncio.sleep(POLL_INTERVAL)
 
