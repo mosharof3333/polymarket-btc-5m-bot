@@ -86,8 +86,37 @@ async def main():
 
             # New window reset
             if state.last_window_ts != now_ts:
-                if state.last_window_ts is not None:
-                    print(f"✅ New 5m window started — positions reset")
+                if state.last_window_ts is not None and (state.up_shares > 0 or state.down_shares > 0):
+                    # Settle previous window P&L before resetting
+                    prev_slug = f"btc-updown-5m-{state.last_window_ts}"
+                    prev_data = await fetch_gamma(session, prev_slug)
+                    settled = False
+                    if prev_data:
+                        try:
+                            prev_market = prev_data[0].get("markets", [prev_data[0]])[0]
+                            prices = json.loads(prev_market.get("outcomePrices", "[0.5,0.5]"))
+                            up_final = float(prices[0])
+                            down_final = float(prices[1])
+                            if up_final >= 0.99:
+                                winner = "UP"
+                                payout = state.up_shares * 1.0
+                            else:
+                                winner = "DOWN"
+                                payout = state.down_shares * 1.0
+                            total_cost = state.up_cost + state.down_cost
+                            net_pnl = payout - total_cost
+                            old_capital = state.capital
+                            state.capital += payout
+                            result = "WIN" if net_pnl > 0 else "LOSS"
+                            pnl_str = f"+${net_pnl:.2f}" if net_pnl >= 0 else f"-${abs(net_pnl):.2f}"
+                            print(f"📊 PREV WINDOW SETTLED ({winner} wins) | {result} {pnl_str} | Capital: ${old_capital:.2f} → ${state.capital:.2f}")
+                            settled = True
+                        except:
+                            pass
+                    if not settled:
+                        print(f"⚠️  Could not settle prev window — positions dropped, capital unchanged")
+                elif state.last_window_ts is not None:
+                    print(f"✅ New 5m window started — no open positions")
                 state.last_window_ts = now_ts
                 state.current_side = None
                 state.up_shares = state.down_shares = 0.0
