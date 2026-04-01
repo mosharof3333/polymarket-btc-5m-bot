@@ -97,10 +97,10 @@ async def main():
                             prices = json.loads(prev_market.get("outcomePrices", "[0.5,0.5]"))
                             up_final = float(prices[0])
                             down_final = float(prices[1])
-                            if up_final >= 0.99:
+                            if up_final >= 0.80:
                                 winner = "UP"
                                 payout = state.up_shares * 1.0
-                            elif down_final >= 0.99:
+                            elif down_final >= 0.80:
                                 winner = "DOWN"
                                 payout = state.down_shares * 1.0
                             else:
