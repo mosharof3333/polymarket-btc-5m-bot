@@ -6,8 +6,9 @@ import os
 
 STATE_FILE = "bot_state.json"
 BASE_SHARES = 10
-POLL_INTERVAL = 0.15          # 150ms — very aggressive for millisecond reaction
+POLL_INTERVAL = 0.15          # 150ms polling for fast reaction
 CLOB_BASE = "https://clob.polymarket.com"
+PRINT_PRICE_EVERY = 8         # Print price every \~8 polls (\~1.2 seconds) even without trade
 
 class BotState:
     def __init__(self):
@@ -19,6 +20,7 @@ class BotState:
         self.up_cost = 0.0
         self.down_cost = 0.0
         self.last_buy_size = 0.0
+        self.poll_count = 0
 
 def load_state():
     if os.path.exists(STATE_FILE):
@@ -61,10 +63,9 @@ async def fetch_gamma(session, slug):
     return None
 
 async def get_best_ask(session, token_id):
-    """Get best ASK price (what you pay to BUY shares) — tick level"""
     if not token_id:
         return 0.5
-    url = f"{CLOB_BASE}/price?token_id={token_id}&side=SELL"  # SELL side price = ask for buyer
+    url = f"{CLOB_BASE}/price?token_id={token_id}&side=SELL"  # Best ask for buyer
     try:
         async with session.get(url, timeout=2) as resp:
             if resp.status == 200:
@@ -76,7 +77,7 @@ async def get_best_ask(session, token_id):
 
 async def main():
     state = load_state()
-    print(f"🚀 BTC 5m TICK-LEVEL Doubling Bot started | Capital: ${state.capital:.2f} | Polling 150ms")
+    print(f"🚀 BTC 5m TICK-LEVEL Doubling Bot started | Capital: ${state.capital:.2f} | Live price logging every \~1.2s")
     
     async with aiohttp.ClientSession() as session:
         while True:
@@ -84,11 +85,10 @@ async def main():
             slug = f"btc-updown-5m-{now_ts}"
             
             event_data = await fetch_gamma(session, slug)
-            if not event_data or not event_data:
+            if not event_data:
                 await asyncio.sleep(POLL_INTERVAL)
                 continue
             
-            # Get clobTokenIds
             market = event_data[0].get("markets", [event_data[0]])[0]
             closed = market.get("closed", False)
             clob_str = market.get("clobTokenIds", "[]")
@@ -102,29 +102,40 @@ async def main():
             # New window reset
             if now_ts != state.last_window_ts:
                 if state.last_window_ts is not None:
-                    print(f"✅ Window ended. Capital: ${state.capital:.2f}")
+                    print(f"✅ Previous window ended. Capital: ${state.capital:.2f}")
                 state.last_window_ts = now_ts
                 state.current_side = None
                 state.up_shares = state.down_shares = 0.0
                 state.up_cost = state.down_cost = 0.0
                 state.last_buy_size = 0.0
+                state.poll_count = 0
                 save_state(state)
-                print(f"🌟 NEW WINDOW: {slug}")
+                print(f"🌟 NEW 5m WINDOW STARTED: {slug}")
             
             if closed:
-                up_price = 1.0 if market.get("outcomePrices") and json.loads(market["outcomePrices"])[0] >= 0.999 else 0.0
-                payout = state.up_shares if up_price >= 0.999 else state.down_shares
+                up_wins = False
+                if "outcomePrices" in market:
+                    prices = json.loads(market["outcomePrices"])
+                    up_wins = float(prices[0]) >= 0.999
+                payout = state.up_shares if up_wins else state.down_shares
                 state.capital += payout
                 save_state(state)
-                print(f"🏁 RESOLVED — {'UP' if up_price >= 0.999 else 'DOWN'} wins | Payout ${payout:.2f} | Capital ${state.capital:.2f}")
+                print(f"🏁 WINDOW RESOLVED — {'UP' if up_wins else 'DOWN'} wins | Payout ${payout:.2f} | Capital ${state.capital:.2f}")
                 await asyncio.sleep(2)
                 continue
             
-            # Fast tick prices (best ask)
+            # Live tick prices (best ask)
             up_ask = await get_best_ask(session, up_token)
             down_ask = await get_best_ask(session, down_token)
             
-            # === STRATEGY: Tick-level triggers + doubling ===
+            state.poll_count += 1
+            
+            # Real-time price logging (what you wanted to see)
+            if state.poll_count % PRINT_PRICE_EVERY == 0 or state.current_side is None:
+                side_status = f" | Holding {state.current_side.upper()}" if state.current_side else ""
+                print(f"LIVE: Up ask {up_ask:.4f} | Down ask {down_ask:.4f}{side_status} | Capital ${state.capital:.2f}")
+            
+            # === YOUR STRATEGY: First 10 shares at 60¢, then double on every reversal ===
             if state.current_side is None:
                 if up_ask >= 0.60:
                     shares = BASE_SHARES
@@ -136,7 +147,7 @@ async def main():
                         state.current_side = "up"
                         state.last_buy_size = shares
                         save_state(state)
-                        print(f"📈 FIRST BUY UP {shares} @ {up_ask:.4f} | Cost ${cost:.2f} | Capital ${state.capital:.2f}")
+                        print(f"📈 FIRST BUY → UP {shares} shares @ {up_ask:.4f} | Cost ${cost:.2f} | Capital ${state.capital:.2f}")
                 elif down_ask >= 0.60:
                     shares = BASE_SHARES
                     cost = shares * down_ask
@@ -147,7 +158,7 @@ async def main():
                         state.current_side = "down"
                         state.last_buy_size = shares
                         save_state(state)
-                        print(f"📉 FIRST BUY DOWN {shares} @ {down_ask:.4f} | Cost ${cost:.2f} | Capital ${state.capital:.2f}")
+                        print(f"📉 FIRST BUY → DOWN {shares} shares @ {down_ask:.4f} | Cost ${cost:.2f} | Capital ${state.capital:.2f}")
             
             elif state.current_side == "up" and down_ask >= 0.60:
                 new_shares = int(state.last_buy_size * 2)
@@ -159,7 +170,7 @@ async def main():
                     state.current_side = "down"
                     state.last_buy_size = new_shares
                     save_state(state)
-                    print(f"🔄 FLIP DOWN {new_shares} @ {down_ask:.4f} | Cost ${cost:.2f} | Capital ${state.capital:.2f} (next: {new_shares*2})")
+                    print(f"🔄 FLIP → DOWN {new_shares} @ {down_ask:.4f} | Cost ${cost:.2f} | Capital ${state.capital:.2f} (next double: {new_shares*2})")
             
             elif state.current_side == "down" and up_ask >= 0.60:
                 new_shares = int(state.last_buy_size * 2)
@@ -171,7 +182,7 @@ async def main():
                     state.current_side = "up"
                     state.last_buy_size = new_shares
                     save_state(state)
-                    print(f"🔄 FLIP UP {new_shares} @ {up_ask:.4f} | Cost ${cost:.2f} | Capital ${state.capital:.2f} (next: {new_shares*2})")
+                    print(f"🔄 FLIP → UP {new_shares} @ {up_ask:.4f} | Cost ${cost:.2f} | Capital ${state.capital:.2f} (next double: {new_shares*2})")
             
             await asyncio.sleep(POLL_INTERVAL)
 
