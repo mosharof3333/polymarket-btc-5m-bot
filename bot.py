@@ -8,6 +8,7 @@ STATE_FILE    = "bot_state.json"
 BUY_SHARES    = 100
 PRE_BUY_SECS  = 60     # pre-buy this many seconds before next window
 TRIGGER       = 0.70   # when one side hits this, sell other side and double winner
+TP_WINNER     = 0.99   # take profit for doubled winner side
 POLL_INTERVAL = 0.15
 CLOB_BASE     = "https://clob.polymarket.com"
 PRINT_EVERY   = 20
@@ -309,12 +310,28 @@ async def main():
             # ── PHASE: doubled ──────────────────────────────────────────────
             elif state.phase == "doubled":
                 winner = state.winner_side
-                shares = state.up_shares  if winner == "up" else state.down_shares
-                ask    = await get_best_ask(session, state.up_token if winner == "up" else state.down_token)
+                token  = state.up_token  if winner == "up" else state.down_token
+                shares = state.up_shares if winner == "up" else state.down_shares
+                cost   = state.up_cost   if winner == "up" else state.down_cost
+                ask    = await get_best_ask(session, token)
                 if state.poll_count % PRINT_EVERY == 0:
-                    print(f"👀 doubled | {winner.upper()} {shares:.0f} shares @ {ask:.4f} | Capital ${state.capital:.2f}")
+                    print(f"👀 doubled | {winner.upper()} {shares:.0f} shares @ {ask:.4f} (TP {TP_WINNER}) | Capital ${state.capital:.2f}")
 
-                if state.trade_window and now >= state.trade_window + 300:
+                if ask >= TP_WINNER:
+                    bid      = await get_best_bid(session, token)
+                    proceeds = shares * min(bid, TP_WINNER)
+                    net      = proceeds - cost
+                    state.capital += net
+                    if winner == "up":
+                        state.up_shares = 0.0;  state.up_cost = 0.0
+                    else:
+                        state.down_shares = 0.0; state.down_cost = 0.0
+                    state.phase = "done"
+                    save_state(state)
+                    pnl = f"+${net:.2f}" if net >= 0 else f"-${abs(net):.2f}"
+                    print(f"🎯 TP HIT — {winner.upper()} {ask:.4f} | sold {shares:.0f} @ {min(bid,TP_WINNER):.4f} | net {pnl} | Capital ${state.capital:.2f}")
+
+                elif state.trade_window and now >= state.trade_window + 300:
                     await settle_remaining(state, session)
 
             # ── PHASE: done ─────────────────────────────────────────────────
