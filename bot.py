@@ -46,6 +46,7 @@ class BotState:
         self.dn_cost          = 0.0
         self.dn_done          = False  # TP hit on DN side
 
+        self.completed_window = None   # last window we finished — never re-enter it
         self.poll_count       = 0
 
 def load_state():
@@ -66,6 +67,7 @@ def load_state():
         s.dn_shares        = d.get("dn_shares", 0.0)
         s.dn_cost          = d.get("dn_cost", 0.0)
         s.dn_done          = d.get("dn_done", False)
+        s.completed_window = d.get("completed_window")
         return s
     return BotState()
 
@@ -85,6 +87,7 @@ def save_state(s):
             "dn_shares":        round(s.dn_shares, 6),
             "dn_cost":          round(s.dn_cost, 4),
             "dn_done":          s.dn_done,
+            "completed_window": s.completed_window,
         }, f, indent=2)
 
 # ── API helpers ───────────────────────────────────────────────────────────────
@@ -204,6 +207,14 @@ async def main():
 
             # ── PHASE: waiting ────────────────────────────────────────────
             if state.phase == "waiting":
+                # never re-enter a window that already completed this session
+                if current_window == state.completed_window:
+                    if state.poll_count % PRINT_EVERY == 0:
+                        secs_to_next = 300 - secs_elapsed
+                        print(f"⏳ window done — next in {secs_to_next}s | Capital {cap(state.capital)}")
+                    await asyncio.sleep(POLL_INTERVAL)
+                    continue
+
                 slug       = f"btc-updown-5m-{current_window}"
                 event_data = await fetch_gamma(session, slug)
                 if event_data:
@@ -337,6 +348,7 @@ async def main():
             # ── PHASE: done ───────────────────────────────────────────────
             elif state.phase == "done":
                 print(f"✔️  Round complete | Capital {cap(state.capital)}")
+                state.completed_window = state.trade_window   # block re-entry
                 state.up_token    = state.down_token  = None
                 state.trade_window = None
                 state.first_side   = None
