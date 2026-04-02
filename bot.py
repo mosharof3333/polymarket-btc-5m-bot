@@ -198,7 +198,10 @@ async def main():
 
             # ── PHASE: pre_bought ───────────────────────────────────────────
             elif state.phase == "pre_bought":
-                if now >= state.trade_window:
+                if not state.trade_window:
+                    state.phase = "waiting"
+                    save_state(state)
+                elif now >= state.trade_window:
                     state.phase = "tp_initial"
                     save_state(state)
                     print(f"🟢 WINDOW LIVE — watching UP & DOWN for TP1 @ {TP1}")
@@ -234,7 +237,7 @@ async def main():
                     print(f"✅ TP1 HIT — DOWN {down_ask:.4f} | sold 100 @ {min(down_bid,TP1):.4f} | +${proceeds:.2f} | Capital ${state.capital:.2f}")
                     print(f"   UP still open — TP2 @ {TP2}")
 
-                elif now >= state.trade_window + 300:
+                elif state.trade_window and now >= state.trade_window + 300:
                     await settle_remaining(state, session)
 
             # ── PHASE: tp_secondary ─────────────────────────────────────────
@@ -260,7 +263,7 @@ async def main():
                     print(f"🎯 TP2 HIT — {remaining.upper()} {ask:.4f} | sold {shares:.0f} @ {min(bid,TP2):.4f} | +${proceeds:.2f}")
                     print(f"   Total cost ${total_cost:.2f} | Capital ${state.capital:.2f}")
 
-                elif now >= state.trade_window + 300:
+                elif state.trade_window and now >= state.trade_window + 300:
                     await settle_remaining(state, session)
 
             # ── PHASE: done ─────────────────────────────────────────────────
