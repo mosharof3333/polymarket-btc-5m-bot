@@ -9,6 +9,7 @@ BUY_SHARES    = 100
 PRE_BUY_SECS  = 60     # pre-buy this many seconds before next window
 TRIGGER       = 0.70   # when one side hits this, sell other side and double winner
 TP_WINNER     = 0.99   # take profit for doubled winner side
+SL_WINNER     = 0.45   # stop loss for doubled winner side
 POLL_INTERVAL = 0.15
 CLOB_BASE     = "https://clob.polymarket.com"
 PRINT_EVERY   = 20
@@ -330,6 +331,20 @@ async def main():
                     save_state(state)
                     pnl = f"+${net:.2f}" if net >= 0 else f"-${abs(net):.2f}"
                     print(f"🎯 TP HIT — {winner.upper()} {ask:.4f} | sold {shares:.0f} @ {min(bid,TP_WINNER):.4f} | net {pnl} | Capital ${state.capital:.2f}")
+
+                elif ask <= SL_WINNER:
+                    bid      = await get_best_bid(session, token)
+                    proceeds = shares * bid
+                    net      = proceeds - cost
+                    state.capital += net
+                    if winner == "up":
+                        state.up_shares = 0.0;  state.up_cost = 0.0
+                    else:
+                        state.down_shares = 0.0; state.down_cost = 0.0
+                    state.phase = "done"
+                    save_state(state)
+                    pnl = f"+${net:.2f}" if net >= 0 else f"-${abs(net):.2f}"
+                    print(f"🛑 SL HIT — {winner.upper()} {ask:.4f} | sold {shares:.0f} @ {bid:.4f} | net {pnl} | Capital ${state.capital:.2f}")
 
                 elif state.trade_window and now >= state.trade_window + 300:
                     await settle_remaining(state, session)
