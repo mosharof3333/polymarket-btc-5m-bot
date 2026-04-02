@@ -25,6 +25,7 @@ class BotState:
         self.next_buy_time = None
         self.took_profit = False
         self.poll_count = 0
+        self.prev_winner = None  # "up" or "down" from last settled window
 
 def load_state():
     if os.path.exists(STATE_FILE):
@@ -40,6 +41,7 @@ def load_state():
             state.buy_step = data.get("buy_step", 0)
             state.next_buy_time = data.get("next_buy_time")
             state.took_profit = data.get("took_profit", False)
+            state.prev_winner = data.get("prev_winner")
             return state
     return BotState()
 
@@ -54,6 +56,7 @@ def save_state(state):
         "buy_step": state.buy_step,
         "next_buy_time": state.next_buy_time,
         "took_profit": state.took_profit,
+        "prev_winner": state.prev_winner,
     }
     with open(STATE_FILE, "w") as f:
         json.dump(data, f, indent=2)
@@ -131,10 +134,12 @@ async def main():
                             if up_final >= 0.80:
                                 payout = state.up_shares * 1.0
                                 await settle_pnl(state, payout, f"📊 PREV WINDOW SETTLED (UP wins)")
+                                state.prev_winner = "up"
                                 settled = True
                             elif down_final >= 0.80:
                                 payout = state.down_shares * 1.0
                                 await settle_pnl(state, payout, f"📊 PREV WINDOW SETTLED (DOWN wins)")
+                                state.prev_winner = "down"
                                 settled = True
                         except:
                             pass
@@ -187,13 +192,19 @@ async def main():
                     await asyncio.sleep(POLL_INTERVAL)
                     continue
 
-            # Buy cheaper side every 30s until 4:30
+            # Buy every 30s until 3:00 — follow prev winner if known, else buy cheaper side
             elapsed = int(time.time()) - state.last_window_ts
             now = int(time.time())
             if not state.took_profit and elapsed <= BUY_UNTIL:
                 if state.next_buy_time is None or now >= state.next_buy_time:
                     shares = FIRST_BUY_SHARES
-                    if up_ask <= down_ask:
+                    if state.prev_winner == "up":
+                        side = "up"
+                        price = up_ask
+                    elif state.prev_winner == "down":
+                        side = "down"
+                        price = down_ask
+                    elif up_ask <= down_ask:
                         side = "up"
                         price = up_ask
                     else:
@@ -211,7 +222,8 @@ async def main():
                         state.buy_step += 1
                         state.next_buy_time = now + BUY_INTERVAL
                         save_state(state)
-                        print(f"🛒 BUY {side.upper()} {shares} @ {price:.4f} | Cost ${cost:.2f} | Capital ${state.capital:.2f} | Next buy in 30s")
+                        reason = f"prev winner" if state.prev_winner else "cheaper side"
+                        print(f"🛒 BUY {side.upper()} {shares} @ {price:.4f} | Cost ${cost:.2f} | Capital ${state.capital:.2f} | {reason} | Next in 30s")
                     else:
                         print(f"⚠️  Insufficient capital for {shares} shares @ ${price:.4f} (need ${cost:.2f})")
 
