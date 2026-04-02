@@ -141,7 +141,7 @@ async def try_pre_buy_next(state, session, next_window, secs_to_next):
     down_ask = await get_best_ask(session, down_token)
     cost_up   = BUY_SHARES * up_ask
     cost_down = BUY_SHARES * down_ask
-    state.capital          -= (cost_up + cost_down)
+    state.capital          -= 0  # costs settled per-side at resolution, not upfront
     state.next_window       = next_window
     state.next_up_shares    = BUY_SHARES
     state.next_down_shares  = BUY_SHARES
@@ -218,23 +218,29 @@ async def main():
                 if up_ask >= TP1:
                     up_bid   = await get_best_bid(session, state.up_token)
                     proceeds = state.up_shares * min(up_bid, TP1)
-                    state.capital      += proceeds
+                    net      = proceeds - state.up_cost
+                    state.capital      += net
                     state.up_shares     = 0.0
+                    state.up_cost       = 0.0
                     state.first_tp_side = "up"
                     state.phase         = "tp_secondary"
                     save_state(state)
-                    print(f"✅ TP1 HIT — UP {up_ask:.4f} | sold 100 @ {min(up_bid,TP1):.4f} | +${proceeds:.2f} | Capital ${state.capital:.2f}")
+                    pnl = f"+${net:.2f}" if net >= 0 else f"-${abs(net):.2f}"
+                    print(f"✅ TP1 HIT — UP {up_ask:.4f} | sold 100 @ {min(up_bid,TP1):.4f} | net {pnl} | Capital ${state.capital:.2f}")
                     print(f"   DOWN still open — TP2 @ {TP2}")
 
                 elif down_ask >= TP1:
                     down_bid  = await get_best_bid(session, state.down_token)
                     proceeds  = state.down_shares * min(down_bid, TP1)
-                    state.capital       += proceeds
+                    net       = proceeds - state.down_cost
+                    state.capital       += net
                     state.down_shares    = 0.0
+                    state.down_cost      = 0.0
                     state.first_tp_side  = "down"
                     state.phase          = "tp_secondary"
                     save_state(state)
-                    print(f"✅ TP1 HIT — DOWN {down_ask:.4f} | sold 100 @ {min(down_bid,TP1):.4f} | +${proceeds:.2f} | Capital ${state.capital:.2f}")
+                    pnl = f"+${net:.2f}" if net >= 0 else f"-${abs(net):.2f}"
+                    print(f"✅ TP1 HIT — DOWN {down_ask:.4f} | sold 100 @ {min(down_bid,TP1):.4f} | net {pnl} | Capital ${state.capital:.2f}")
                     print(f"   UP still open — TP2 @ {TP2}")
 
                 elif state.trade_window and now >= state.trade_window + 300:
@@ -252,16 +258,19 @@ async def main():
                 if ask >= TP2:
                     bid      = await get_best_bid(session, token)
                     proceeds = shares * min(bid, TP2)
-                    state.capital += proceeds
+                    cost     = state.down_cost if remaining == "down" else state.up_cost
+                    net      = proceeds - cost
+                    state.capital += net
                     if remaining == "down":
                         state.down_shares = 0.0
+                        state.down_cost   = 0.0
                     else:
                         state.up_shares = 0.0
+                        state.up_cost   = 0.0
                     state.phase = "done"
                     save_state(state)
-                    total_cost = state.up_cost + state.down_cost
-                    print(f"🎯 TP2 HIT — {remaining.upper()} {ask:.4f} | sold {shares:.0f} @ {min(bid,TP2):.4f} | +${proceeds:.2f}")
-                    print(f"   Total cost ${total_cost:.2f} | Capital ${state.capital:.2f}")
+                    pnl = f"+${net:.2f}" if net >= 0 else f"-${abs(net):.2f}"
+                    print(f"🎯 TP2 HIT — {remaining.upper()} {ask:.4f} | sold {shares:.0f} @ {min(bid,TP2):.4f} | net {pnl} | Capital ${state.capital:.2f}")
 
                 elif state.trade_window and now >= state.trade_window + 300:
                     await settle_remaining(state, session)
@@ -297,11 +306,15 @@ async def settle_remaining(state, session):
     else:
         payout = state.down_shares * 1.0
         winner = "DOWN"
-    total_cost = state.up_cost + state.down_cost
-    net_pnl    = payout - total_cost
-    state.capital += payout
+    # per-side settlement: deduct only the costs of the sides still open
+    # (if TP1 already hit one side, that side's cost was already settled and reset to 0)
+    open_cost  = state.up_cost + state.down_cost
+    net_pnl    = payout - open_cost
+    state.capital += net_pnl
+    state.up_shares  = state.down_shares  = 0.0
+    state.up_cost    = state.down_cost    = 0.0
     pnl_str = f"+${net_pnl:.2f}" if net_pnl >= 0 else f"-${abs(net_pnl):.2f}"
-    print(f"⏰ WINDOW EXPIRED — {winner} wins | payout ${payout:.2f} | cost ${total_cost:.2f} | {'WIN' if net_pnl>0 else 'LOSS'} {pnl_str} | Capital ${state.capital:.2f}")
+    print(f"⏰ WINDOW EXPIRED — {winner} wins | payout ${payout:.2f} | cost ${open_cost:.2f} | {'WIN' if net_pnl>0 else 'LOSS'} {pnl_str} | Capital ${state.capital:.2f}")
     state.phase = "done"
     save_state(state)
 
