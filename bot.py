@@ -200,12 +200,12 @@ async def main():
                         state.down_token  = dn_tok
                         state.trade_window = current_window
                         state.phase        = "monitoring"
-                        up_ask = await get_best_ask(session, up_tok)
-                        reset_martingale(state, up_ask)
+                        reset_martingale(state, 0.99)   # grid covers full 0.01–0.99 range
                         state.up_shares = state.up_cost = 0.0
                         save_state(state)
-                        print(f"🟢 WINDOW LIVE {slug} | {up_s(f'UP @ {up_ask:.4f}')} | "
-                              f"reference set | Capital {cap(state.capital)}")
+                        up_ask_now = await get_best_ask(session, up_tok)
+                        print(f"🟢 WINDOW LIVE {slug} | {up_s(f'UP @ {up_ask_now:.4f}')} | "
+                              f"ref 0.99 → first buy < 0.89 | Capital {cap(state.capital)}")
                     elif state.poll_count % PRINT_EVERY == 0:
                         print(f"⏳ fetching market data… T+{secs_elapsed}s")
                 elif state.poll_count % PRINT_EVERY == 0:
@@ -249,8 +249,8 @@ async def main():
                 if state.up_shares > 0 and up_ask >= tp_price(state):
                     print(f"🎯 TAKE PROFIT — {up_s(f'UP {up_ask:.4f}')} >= TP {tp_price(state):.4f}")
                     await sell_all(state, session, reason="TP")
-                    # restart within same window
-                    reset_martingale(state, up_ask)
+                    # restart within same window — full range again
+                    reset_martingale(state, 0.99)
                     save_state(state)
                     print(f"🔄 Restarting within window | ref {up_ask:.4f} | next buy < {up_ask - DROP_STEP:.4f}")
 
