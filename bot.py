@@ -11,7 +11,6 @@ CLOB_BASE = "https://clob.polymarket.com"
 PRINT_PRICE_EVERY = 8
 
 MAX_FLIPS = 4
-SELL_AT_SECONDS = 294  # 4.9 minutes into window
 STOP_LOSS_PRICE = 0.45  # Stop loss on last flip position
 
 class BotState:
@@ -258,29 +257,6 @@ async def main():
                     save_state(state)
                     await asyncio.sleep(POLL_INTERVAL)
                     continue
-
-            # Forced sell at 4.9 minutes
-            elapsed = int(time.time()) - state.last_window_ts
-            if elapsed >= SELL_AT_SECONDS and not state.force_sold and (state.up_shares > 0 or state.down_shares > 0):
-                up_bid = await get_best_bid(session, up_token)
-                down_bid = await get_best_bid(session, down_token)
-                proceeds = (state.up_shares * min(up_bid, 0.99)) + (state.down_shares * min(down_bid, 0.99))
-                total_cost = state.up_cost + state.down_cost
-                net_pnl = proceeds - total_cost
-                old_capital = state.capital
-                state.capital += proceeds
-                state.force_sold = True
-                result = "WIN" if net_pnl > 0 else "LOSS"
-                pnl_str = f"+${net_pnl:.2f}" if net_pnl >= 0 else f"-${abs(net_pnl):.2f}"
-                print(f"⏱️  4.9 MIN FORCED SELL | UP {state.up_shares:.0f} @ {up_bid:.4f} | DOWN {state.down_shares:.0f} @ {down_bid:.4f}")
-                print(f"   Proceeds: ${proceeds:.2f} | Cost: ${total_cost:.2f} | {result} {pnl_str}")
-                print(f"   Capital: ${old_capital:.2f} → ${state.capital:.2f}")
-                state.up_shares = state.down_shares = 0.0
-                state.up_cost = state.down_cost = 0.0
-                state.current_side = None
-                save_state(state)
-                await asyncio.sleep(POLL_INTERVAL)
-                continue
 
             # Your strategy (10 → double on flips, max 4 flips)
             if state.current_side is None and not state.force_sold:
