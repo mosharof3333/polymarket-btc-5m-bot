@@ -199,13 +199,13 @@ async def trigger_double(state, session, winner, loser):
     # ── buy 100 more on winner ────────────────────────────────────────────
     winner_ask  = await get_best_ask(session, winner_token)
     extra_cost  = BUY_SHARES * winner_ask
-    state.capital -= extra_cost
+    state.capital -= extra_cost   # deduct cash immediately (market buy)
+    # NOTE: do NOT add extra_cost to winner_cost — it is already deducted from capital.
+    # Only the original pre-buy cost (not yet settled) remains in up_cost/down_cost.
     if winner == "up":
         state.up_shares += BUY_SHARES
-        state.up_cost   += extra_cost
     else:
         state.down_shares += BUY_SHARES
-        state.down_cost   += extra_cost
 
     winner_shares = state.up_shares if winner == "up" else state.down_shares
     winner_cost   = state.up_cost   if winner == "up" else state.down_cost
