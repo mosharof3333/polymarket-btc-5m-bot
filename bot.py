@@ -6,9 +6,8 @@ import os
 
 STATE_FILE    = "bot_state.json"
 BUY_SHARES    = 100
-PRE_BUY_SECS  = 60    # buy this many seconds before next window
-TP1           = 0.70  # initial take profit — first side to hit this gets sold
-TP2           = 0.99  # secondary take profit — remaining side after TP1 hit
+PRE_BUY_SECS  = 60     # pre-buy this many seconds before next window
+TRIGGER       = 0.70   # when one side hits this, sell other side and double winner
 POLL_INTERVAL = 0.15
 CLOB_BASE     = "https://clob.polymarket.com"
 PRINT_EVERY   = 20
@@ -24,8 +23,8 @@ class BotState:
         self.up_token       = None
         self.down_token     = None
         self.trade_window   = None
-        self.phase          = "waiting"   # waiting/pre_bought/tp_initial/tp_secondary/done
-        self.first_tp_side  = None
+        self.phase          = "waiting"   # waiting/pre_bought/watching/doubled/done
+        self.winner_side    = None        # "up" or "down" after trigger
         # ── next window pre-bought (populated while current window is active) ──
         self.next_window      = None
         self.next_up_shares   = 0.0
@@ -50,7 +49,7 @@ def load_state():
             s.down_token        = data.get("down_token")
             s.trade_window      = data.get("trade_window")
             s.phase             = data.get("phase", "waiting")
-            s.first_tp_side     = data.get("first_tp_side")
+            s.winner_side       = data.get("winner_side")
             s.next_window       = data.get("next_window")
             s.next_up_shares    = data.get("next_up_shares", 0.0)
             s.next_down_shares  = data.get("next_down_shares", 0.0)
@@ -73,7 +72,7 @@ def save_state(s):
             "down_token":        s.down_token,
             "trade_window":      s.trade_window,
             "phase":             s.phase,
-            "first_tp_side":     s.first_tp_side,
+            "winner_side":       s.winner_side,
             "next_window":       s.next_window,
             "next_up_shares":    s.next_up_shares,
             "next_down_shares":  s.next_down_shares,
@@ -128,7 +127,7 @@ def get_tokens(market):
 async def try_pre_buy_next(state, session, next_window, secs_to_next):
     """Pre-buy both sides of the upcoming window if not already done."""
     if state.next_window == next_window:
-        return  # already pre-bought this window
+        return
     upcoming_slug = f"btc-updown-5m-{next_window}"
     event_data = await fetch_gamma(session, upcoming_slug)
     if not event_data:
@@ -141,7 +140,7 @@ async def try_pre_buy_next(state, session, next_window, secs_to_next):
     down_ask = await get_best_ask(session, down_token)
     cost_up   = BUY_SHARES * up_ask
     cost_down = BUY_SHARES * down_ask
-    state.capital          -= 0  # costs settled per-side at resolution, not upfront
+    # costs settled per-side at resolution, not deducted upfront
     state.next_window       = next_window
     state.next_up_shares    = BUY_SHARES
     state.next_down_shares  = BUY_SHARES
@@ -165,15 +164,96 @@ def activate_next_window(state):
     state.down_token    = state.next_down_token
     state.trade_window  = state.next_window
     state.phase         = "pre_bought"
-    state.first_tp_side = None
+    state.winner_side   = None
     state.next_window       = None
     state.next_up_shares    = state.next_down_shares   = 0.0
     state.next_up_cost      = state.next_down_cost     = 0.0
     state.next_up_token     = state.next_down_token    = None
 
+async def trigger_double(state, session, winner, loser):
+    """
+    Sell the loser side at market bid, then buy 100 more shares on winner at market ask.
+    winner / loser: "up" or "down"
+    """
+    loser_token  = state.up_token  if loser  == "up" else state.down_token
+    winner_token = state.up_token  if winner == "up" else state.down_token
+    loser_shares = state.up_shares if loser  == "up" else state.down_shares
+    loser_cost   = state.up_cost   if loser  == "up" else state.down_cost
+
+    # ── sell loser at market bid ──────────────────────────────────────────
+    loser_bid  = await get_best_bid(session, loser_token)
+    loser_proc = loser_shares * loser_bid
+    loser_net  = loser_proc - loser_cost
+    state.capital += loser_net
+    if loser == "up":
+        state.up_shares = 0.0;  state.up_cost = 0.0
+    else:
+        state.down_shares = 0.0; state.down_cost = 0.0
+
+    pnl_str = f"+${loser_net:.2f}" if loser_net >= 0 else f"-${abs(loser_net):.2f}"
+    print(f"🔴 SELL {loser.upper()} (loser) | {loser_shares:.0f} @ {loser_bid:.4f} "
+          f"| cost ${loser_cost:.2f} | net {pnl_str} | Capital ${state.capital:.2f}")
+
+    # ── buy 100 more on winner ────────────────────────────────────────────
+    winner_ask  = await get_best_ask(session, winner_token)
+    extra_cost  = BUY_SHARES * winner_ask
+    state.capital -= extra_cost
+    if winner == "up":
+        state.up_shares += BUY_SHARES
+        state.up_cost   += extra_cost
+    else:
+        state.down_shares += BUY_SHARES
+        state.down_cost   += extra_cost
+
+    winner_shares = state.up_shares if winner == "up" else state.down_shares
+    winner_cost   = state.up_cost   if winner == "up" else state.down_cost
+    print(f"🟢 BUY +100 {winner.upper()} (winner) | @ {winner_ask:.4f} | extra cost ${extra_cost:.2f}")
+    print(f"   {winner.upper()} now {winner_shares:.0f} shares | total cost ${winner_cost:.2f} | Capital ${state.capital:.2f}")
+
+    state.winner_side = winner
+    state.phase = "doubled"
+    save_state(state)
+
+async def settle_remaining(state, session):
+    """Settle open positions at window expiry (called when window expires)."""
+    if state.phase == "doubled":
+        # Only winner side remains — settles at $1/share
+        winner = state.winner_side
+        shares = state.up_shares  if winner == "up" else state.down_shares
+        cost   = state.up_cost    if winner == "up" else state.down_cost
+        payout = shares * 1.0
+        net    = payout - cost
+        state.capital += net
+        state.up_shares  = state.down_shares = 0.0
+        state.up_cost    = state.down_cost   = 0.0
+        pnl_str = f"+${net:.2f}" if net >= 0 else f"-${abs(net):.2f}"
+        print(f"⏰ EXPIRY — {winner.upper()} wins | {shares:.0f} shares @ $1.00 "
+              f"| cost ${cost:.2f} | {'WIN' if net>0 else 'LOSS'} {pnl_str} | Capital ${state.capital:.2f}")
+    else:
+        # watching phase — neither side triggered; pick higher ask as winner
+        up_ask   = await get_best_ask(session, state.up_token)
+        down_ask = await get_best_ask(session, state.down_token)
+        if up_ask >= down_ask:
+            payout = state.up_shares * 1.0
+            winner = "UP"
+        else:
+            payout = state.down_shares * 1.0
+            winner = "DOWN"
+        open_cost = state.up_cost + state.down_cost
+        net       = payout - open_cost
+        state.capital += net
+        state.up_shares  = state.down_shares = 0.0
+        state.up_cost    = state.down_cost   = 0.0
+        pnl_str = f"+${net:.2f}" if net >= 0 else f"-${abs(net):.2f}"
+        print(f"⏰ EXPIRY (no trigger) — {winner} wins | payout ${payout:.2f} "
+              f"| cost ${open_cost:.2f} | {'WIN' if net>0 else 'LOSS'} {pnl_str} | Capital ${state.capital:.2f}")
+
+    state.phase = "done"
+    save_state(state)
+
 async def main():
     state = load_state()
-    print(f"🚀 BTC 5m Straddle Bot | Capital ${state.capital:.2f} | Phase: {state.phase}")
+    print(f"🚀 BTC 5m Double-Down Bot | Capital ${state.capital:.2f} | Phase: {state.phase}")
 
     async with aiohttp.ClientSession() as session:
         while True:
@@ -192,7 +272,7 @@ async def main():
                 if state.next_window and now >= state.next_window:
                     activate_next_window(state)
                     save_state(state)
-                    print(f"🟢 WINDOW LIVE — watching UP & DOWN for TP1 @ {TP1}")
+                    print(f"🟢 WINDOW LIVE — watching UP & DOWN | trigger @ {TRIGGER}")
                 elif state.poll_count % PRINT_EVERY == 0:
                     print(f"⏳ waiting | T-{secs_to_next}s to next window | Capital ${state.capital:.2f}")
 
@@ -202,77 +282,39 @@ async def main():
                     state.phase = "waiting"
                     save_state(state)
                 elif now >= state.trade_window:
-                    state.phase = "tp_initial"
+                    state.phase = "watching"
                     save_state(state)
-                    print(f"🟢 WINDOW LIVE — watching UP & DOWN for TP1 @ {TP1}")
+                    print(f"🟢 WINDOW LIVE — watching UP & DOWN | trigger @ {TRIGGER}")
                 elif state.poll_count % PRINT_EVERY == 0:
                     print(f"⏳ pre_bought | T-{state.trade_window - now}s to live | Capital ${state.capital:.2f}")
 
-            # ── PHASE: tp_initial ───────────────────────────────────────────
-            elif state.phase == "tp_initial":
+            # ── PHASE: watching ─────────────────────────────────────────────
+            elif state.phase == "watching":
                 up_ask   = await get_best_ask(session, state.up_token)
                 down_ask = await get_best_ask(session, state.down_token)
                 if state.poll_count % PRINT_EVERY == 0:
-                    print(f"👀 TP1 | UP {up_ask:.4f}  DN {down_ask:.4f} | Capital ${state.capital:.2f}")
+                    print(f"👀 watching | UP {up_ask:.4f}  DN {down_ask:.4f} | Capital ${state.capital:.2f}")
 
-                if up_ask >= TP1:
-                    up_bid   = await get_best_bid(session, state.up_token)
-                    proceeds = state.up_shares * min(up_bid, TP1)
-                    net      = proceeds - state.up_cost
-                    state.capital      += net
-                    state.up_shares     = 0.0
-                    state.up_cost       = 0.0
-                    state.first_tp_side = "up"
-                    state.phase         = "tp_secondary"
-                    save_state(state)
-                    pnl = f"+${net:.2f}" if net >= 0 else f"-${abs(net):.2f}"
-                    print(f"✅ TP1 HIT — UP {up_ask:.4f} | sold 100 @ {min(up_bid,TP1):.4f} | net {pnl} | Capital ${state.capital:.2f}")
-                    print(f"   DOWN still open — TP2 @ {TP2}")
+                if up_ask >= TRIGGER:
+                    print(f"🎯 TRIGGER — UP hit {up_ask:.4f} >= {TRIGGER}")
+                    await trigger_double(state, session, winner="up", loser="down")
 
-                elif down_ask >= TP1:
-                    down_bid  = await get_best_bid(session, state.down_token)
-                    proceeds  = state.down_shares * min(down_bid, TP1)
-                    net       = proceeds - state.down_cost
-                    state.capital       += net
-                    state.down_shares    = 0.0
-                    state.down_cost      = 0.0
-                    state.first_tp_side  = "down"
-                    state.phase          = "tp_secondary"
-                    save_state(state)
-                    pnl = f"+${net:.2f}" if net >= 0 else f"-${abs(net):.2f}"
-                    print(f"✅ TP1 HIT — DOWN {down_ask:.4f} | sold 100 @ {min(down_bid,TP1):.4f} | net {pnl} | Capital ${state.capital:.2f}")
-                    print(f"   UP still open — TP2 @ {TP2}")
+                elif down_ask >= TRIGGER:
+                    print(f"🎯 TRIGGER — DOWN hit {down_ask:.4f} >= {TRIGGER}")
+                    await trigger_double(state, session, winner="down", loser="up")
 
                 elif state.trade_window and now >= state.trade_window + 300:
                     await settle_remaining(state, session)
 
-            # ── PHASE: tp_secondary ─────────────────────────────────────────
-            elif state.phase == "tp_secondary":
-                remaining = "down" if state.first_tp_side == "up" else "up"
-                token     = state.down_token if remaining == "down" else state.up_token
-                shares    = state.down_shares if remaining == "down" else state.up_shares
-                ask       = await get_best_ask(session, token)
+            # ── PHASE: doubled ──────────────────────────────────────────────
+            elif state.phase == "doubled":
+                winner = state.winner_side
+                shares = state.up_shares  if winner == "up" else state.down_shares
+                ask    = await get_best_ask(session, state.up_token if winner == "up" else state.down_token)
                 if state.poll_count % PRINT_EVERY == 0:
-                    print(f"👀 TP2 | {remaining.upper()} {ask:.4f} (target {TP2}) | Capital ${state.capital:.2f}")
+                    print(f"👀 doubled | {winner.upper()} {shares:.0f} shares @ {ask:.4f} | Capital ${state.capital:.2f}")
 
-                if ask >= TP2:
-                    bid      = await get_best_bid(session, token)
-                    proceeds = shares * min(bid, TP2)
-                    cost     = state.down_cost if remaining == "down" else state.up_cost
-                    net      = proceeds - cost
-                    state.capital += net
-                    if remaining == "down":
-                        state.down_shares = 0.0
-                        state.down_cost   = 0.0
-                    else:
-                        state.up_shares = 0.0
-                        state.up_cost   = 0.0
-                    state.phase = "done"
-                    save_state(state)
-                    pnl = f"+${net:.2f}" if net >= 0 else f"-${abs(net):.2f}"
-                    print(f"🎯 TP2 HIT — {remaining.upper()} {ask:.4f} | sold {shares:.0f} @ {min(bid,TP2):.4f} | net {pnl} | Capital ${state.capital:.2f}")
-
-                elif state.trade_window and now >= state.trade_window + 300:
+                if state.trade_window and now >= state.trade_window + 300:
                     await settle_remaining(state, session)
 
             # ── PHASE: done ─────────────────────────────────────────────────
@@ -282,12 +324,12 @@ async def main():
                 state.up_cost   = state.down_cost   = 0.0
                 state.up_token  = state.down_token  = None
                 state.trade_window  = None
-                state.first_tp_side = None
+                state.winner_side   = None
                 state.poll_count    = 0
-                # if next window already pre-bought, activate it; else wait
                 if state.next_window and now >= state.next_window:
                     activate_next_window(state)
-                    print(f"🟢 NEXT WINDOW LIVE — watching UP & DOWN for TP1 @ {TP1}")
+                    print(f"🟢 NEXT WINDOW LIVE — watching UP & DOWN | trigger @ {TRIGGER}")
+                    state.phase = "watching"
                 elif state.next_window:
                     state.phase = "pre_bought"
                     print(f"⏳ next window pre-bought, T-{state.next_window - now}s to live")
@@ -296,27 +338,6 @@ async def main():
                 save_state(state)
 
             await asyncio.sleep(POLL_INTERVAL)
-
-async def settle_remaining(state, session):
-    up_price   = await get_best_ask(session, state.up_token)
-    down_price = await get_best_ask(session, state.down_token)
-    if up_price >= down_price:
-        payout = state.up_shares * 1.0
-        winner = "UP"
-    else:
-        payout = state.down_shares * 1.0
-        winner = "DOWN"
-    # per-side settlement: deduct only the costs of the sides still open
-    # (if TP1 already hit one side, that side's cost was already settled and reset to 0)
-    open_cost  = state.up_cost + state.down_cost
-    net_pnl    = payout - open_cost
-    state.capital += net_pnl
-    state.up_shares  = state.down_shares  = 0.0
-    state.up_cost    = state.down_cost    = 0.0
-    pnl_str = f"+${net_pnl:.2f}" if net_pnl >= 0 else f"-${abs(net_pnl):.2f}"
-    print(f"⏰ WINDOW EXPIRED — {winner} wins | payout ${payout:.2f} | cost ${open_cost:.2f} | {'WIN' if net_pnl>0 else 'LOSS'} {pnl_str} | Capital ${state.capital:.2f}")
-    state.phase = "done"
-    save_state(state)
 
 if __name__ == "__main__":
     asyncio.run(main())
