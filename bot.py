@@ -101,7 +101,7 @@ async def settle_pnl(state, payout, label):
     total_cost = state.up_cost + state.down_cost
     net_pnl = payout - total_cost
     old_capital = state.capital
-    state.capital += payout
+    state.capital += net_pnl  # charge cost and add payout together at settlement
     result = "WIN" if net_pnl > 0 else "LOSS"
     pnl_str = f"+${net_pnl:.2f}" if net_pnl >= 0 else f"-${abs(net_pnl):.2f}"
     print(f"{label}")
@@ -183,8 +183,9 @@ async def main():
                 if up_ask >= TAKE_PROFIT or down_ask >= TAKE_PROFIT:
                     up_bid = await get_best_bid(session, up_token)
                     down_bid = await get_best_bid(session, down_token)
+                    winner = "UP" if up_ask >= TAKE_PROFIT else "DOWN"
                     payout = (state.up_shares * min(up_bid, 0.99)) + (state.down_shares * min(down_bid, 0.99))
-                    await settle_pnl(state, payout, f"🎯 TAKE PROFIT — {'UP' if up_ask >= TAKE_PROFIT else 'DOWN'} hit {TAKE_PROFIT}")
+                    await settle_pnl(state, payout, f"🎯 TAKE PROFIT — {winner} hit {TAKE_PROFIT}")
                     state.up_shares = state.down_shares = 0.0
                     state.up_cost = state.down_cost = 0.0
                     state.took_profit = True
@@ -211,21 +212,17 @@ async def main():
                         side = "down"
                         price = down_ask
                     cost = shares * price
-                    if state.capital >= cost:
-                        if side == "up":
-                            state.up_shares += shares
-                            state.up_cost += cost
-                        else:
-                            state.down_shares += shares
-                            state.down_cost += cost
-                        state.capital -= cost
-                        state.buy_step += 1
-                        state.next_buy_time = now + BUY_INTERVAL
-                        save_state(state)
-                        reason = f"prev winner" if state.prev_winner else "cheaper side"
-                        print(f"🛒 BUY {side.upper()} {shares} @ {price:.4f} | Cost ${cost:.2f} | Capital ${state.capital:.2f} | {reason} | Next in 30s")
+                    if side == "up":
+                        state.up_shares += shares
+                        state.up_cost += cost
                     else:
-                        print(f"⚠️  Insufficient capital for {shares} shares @ ${price:.4f} (need ${cost:.2f})")
+                        state.down_shares += shares
+                        state.down_cost += cost
+                    state.buy_step += 1
+                    state.next_buy_time = now + BUY_INTERVAL
+                    save_state(state)
+                    reason = f"prev winner" if state.prev_winner else "cheaper side"
+                    print(f"🛒 BUY {side.upper()} {shares} @ {price:.4f} | Cost ${cost:.2f} | {reason} | Next in 30s")
 
             await asyncio.sleep(POLL_INTERVAL)
 
