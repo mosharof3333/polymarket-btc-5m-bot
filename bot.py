@@ -7,7 +7,7 @@ import os
 STATE_FILE = "bot_state.json"
 FIRST_BUY_SHARES = 20
 BUY_INTERVAL = 30       # buy every 30 seconds
-BUY_UNTIL = 270         # stop buying at 4:30 (270 seconds into window)
+BUY_UNTIL = 180         # stop buying at 3:00 (180 seconds into window)
 TAKE_PROFIT = 0.99      # sell all when either side hits this
 POLL_INTERVAL = 0.15
 CLOB_BASE = "https://clob.polymarket.com"
