@@ -124,15 +124,19 @@ async def main():
                     if prev_data:
                         try:
                             prev_market = prev_data[0].get("markets", [prev_data[0]])[0]
-                            prices = json.loads(prev_market.get("outcomePrices", "[0.5,0.5]"))
-                            down_final = float(prices[0])  # API: prices[0] = DOWN
-                            up_final = float(prices[1])    # API: prices[1] = UP
+                            prev_clob_str = prev_market.get("clobTokenIds", "[]")
+                            prev_clob_ids = json.loads(prev_clob_str) if isinstance(prev_clob_str, str) else prev_clob_str
+                            prev_up_token = prev_clob_ids[0] if prev_clob_ids else None
+                            prev_down_token = prev_clob_ids[1] if len(prev_clob_ids) > 1 else None
+                            # Use live CLOB prices — same source as the live feed, no index ambiguity
+                            up_final = await get_best_ask(session, prev_up_token)
+                            down_final = await get_best_ask(session, prev_down_token)
                             winner = "up" if up_final >= down_final else "down"
                             if state.up_shares > 0 or state.down_shares > 0:
                                 payout = state.up_shares * 1.0 if winner == "up" else state.down_shares * 1.0
                                 await settle_pnl(state, payout, f"📊 PREV WINDOW SETTLED ({winner.upper()} wins | UP:{up_final:.3f} DOWN:{down_final:.3f})")
                             state.prev_winner = winner
-                            print(f"📌 Next window direction: BUY {winner.upper()} (prev winner | UP:{up_final:.3f} DOWN:{down_final:.3f})")
+                            print(f"📌 Next window direction: BUY {winner.upper()} (UP:{up_final:.3f} DOWN:{down_final:.3f})")
                         except:
                             pass
 
