@@ -22,7 +22,6 @@ class BotState:
         self.up_cost = 0.0
         self.down_cost = 0.0
         self.buy_step = 0
-        self.next_buy_time = None
         self.took_profit = False
         self.poll_count = 0
         self.prev_winner = None  # "up" or "down" from last settled window
@@ -39,7 +38,6 @@ def load_state():
             state.up_cost = data.get("up_cost", 0.0)
             state.down_cost = data.get("down_cost", 0.0)
             state.buy_step = data.get("buy_step", 0)
-            state.next_buy_time = data.get("next_buy_time")
             state.took_profit = data.get("took_profit", False)
             state.prev_winner = data.get("prev_winner")
             return state
@@ -54,7 +52,6 @@ def save_state(state):
         "up_cost": state.up_cost,
         "down_cost": state.down_cost,
         "buy_step": state.buy_step,
-        "next_buy_time": state.next_buy_time,
         "took_profit": state.took_profit,
         "prev_winner": state.prev_winner,
     }
@@ -150,7 +147,6 @@ async def main():
                 state.up_shares = state.down_shares = 0.0
                 state.up_cost = state.down_cost = 0.0
                 state.buy_step = 0
-                state.next_buy_time = None
                 state.took_profit = False
                 state.poll_count = 0
                 save_state(state)
@@ -193,12 +189,11 @@ async def main():
                     await asyncio.sleep(POLL_INTERVAL)
                     continue
 
-            # Buy every 30s until 3:00 — follow prev winner if known, else buy cheaper side
+            # Buy every 30s until 3:00 — follow prev winner direction
             elapsed = int(time.time()) - state.last_window_ts
-            now = int(time.time())
-            if not state.took_profit and elapsed <= BUY_UNTIL:
-                if state.next_buy_time is None or now >= state.next_buy_time:
-                    shares = FIRST_BUY_SHARES
+            if not state.took_profit:
+                target_elapsed = state.buy_step * BUY_INTERVAL
+                if target_elapsed <= BUY_UNTIL and elapsed >= target_elapsed:
                     if state.prev_winner == "up":
                         side = "up"
                         price = up_ask
@@ -208,6 +203,7 @@ async def main():
                     else:
                         await asyncio.sleep(POLL_INTERVAL)
                         continue  # no previous winner yet, skip buying
+                    shares = FIRST_BUY_SHARES
                     cost = shares * price
                     if side == "up":
                         state.up_shares += shares
@@ -216,9 +212,9 @@ async def main():
                         state.down_shares += shares
                         state.down_cost += cost
                     state.buy_step += 1
-                    state.next_buy_time = now + BUY_INTERVAL
                     save_state(state)
-                    print(f"🛒 BUY {side.upper()} {shares} @ {price:.4f} | Cost ${cost:.2f} | following prev winner | Next in 30s")
+                    next_t = state.buy_step * BUY_INTERVAL
+                    print(f"🛒 [{elapsed}s] BUY {side.upper()} {shares} @ {price:.4f} | Cost ${cost:.2f} | step {state.buy_step} | next @ T+{next_t}s")
 
             await asyncio.sleep(POLL_INTERVAL)
 
