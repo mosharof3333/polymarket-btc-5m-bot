@@ -117,11 +117,10 @@ async def main():
 
             # New window
             if state.last_window_ts != now_ts:
-                if state.last_window_ts is not None and (state.up_shares > 0 or state.down_shares > 0):
-                    # Settle previous window
+                if state.last_window_ts is not None:
+                    # Always fetch previous window outcome to set prev_winner
                     prev_slug = f"btc-updown-5m-{state.last_window_ts}"
                     prev_data = await fetch_gamma(session, prev_slug)
-                    settled = False
                     if prev_data:
                         try:
                             prev_market = prev_data[0].get("markets", [prev_data[0]])[0]
@@ -129,19 +128,21 @@ async def main():
                             up_final = float(prices[0])
                             down_final = float(prices[1])
                             if up_final >= 0.80:
-                                payout = state.up_shares * 1.0
-                                await settle_pnl(state, payout, f"📊 PREV WINDOW SETTLED (UP wins)")
+                                if state.up_shares > 0 or state.down_shares > 0:
+                                    payout = state.up_shares * 1.0
+                                    await settle_pnl(state, payout, f"📊 PREV WINDOW SETTLED (UP wins)")
                                 state.prev_winner = "up"
-                                settled = True
+                                print(f"📌 Next window direction: BUY UP (prev winner)")
                             elif down_final >= 0.80:
-                                payout = state.down_shares * 1.0
-                                await settle_pnl(state, payout, f"📊 PREV WINDOW SETTLED (DOWN wins)")
+                                if state.up_shares > 0 or state.down_shares > 0:
+                                    payout = state.down_shares * 1.0
+                                    await settle_pnl(state, payout, f"📊 PREV WINDOW SETTLED (DOWN wins)")
                                 state.prev_winner = "down"
-                                settled = True
+                                print(f"📌 Next window direction: BUY DOWN (prev winner)")
+                            else:
+                                print(f"⚠️  Could not determine prev window winner")
                         except:
                             pass
-                    if not settled:
-                        print(f"⚠️  Could not settle prev window — positions dropped, capital unchanged")
 
                 state.last_window_ts = now_ts
                 state.up_shares = state.down_shares = 0.0
