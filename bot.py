@@ -25,6 +25,7 @@ class BotState:
         self.took_profit = False
         self.poll_count = 0
         self.prev_winner = None  # "up" or "down" from last settled window
+        self.next_buy_shares = FIRST_BUY_SHARES  # doubles on loss, resets on win
 
 def load_state():
     if os.path.exists(STATE_FILE):
@@ -40,6 +41,7 @@ def load_state():
             state.buy_step = data.get("buy_step", 0)
             state.took_profit = data.get("took_profit", False)
             state.prev_winner = data.get("prev_winner")
+            state.next_buy_shares = data.get("next_buy_shares", FIRST_BUY_SHARES)
             return state
     return BotState()
 
@@ -54,6 +56,7 @@ def save_state(state):
         "buy_step": state.buy_step,
         "took_profit": state.took_profit,
         "prev_winner": state.prev_winner,
+        "next_buy_shares": state.next_buy_shares,
     }
     with open(STATE_FILE, "w") as f:
         json.dump(data, f, indent=2)
@@ -99,12 +102,18 @@ async def settle_pnl(state, payout, label):
     net_pnl = payout - total_cost
     old_capital = state.capital
     state.capital += net_pnl  # charge cost and add payout together at settlement
-    result = "WIN" if net_pnl > 0 else "LOSS"
-    pnl_str = f"+${net_pnl:.2f}" if net_pnl >= 0 else f"-${abs(net_pnl):.2f}"
+    won = net_pnl > 0
+    result = "WIN" if won else "LOSS"
+    pnl_str = f"+${net_pnl:.2f}" if won else f"-${abs(net_pnl):.2f}"
+    # Double shares on loss, reset to base on win
+    if won:
+        state.next_buy_shares = FIRST_BUY_SHARES
+    else:
+        state.next_buy_shares = int(state.next_buy_shares * 2)
     print(f"{label}")
     print(f"   UP shares: {state.up_shares:.0f} (cost ${state.up_cost:.2f}) | DOWN shares: {state.down_shares:.0f} (cost ${state.down_cost:.2f})")
     print(f"   Payout: ${payout:.2f} | Total cost: ${total_cost:.2f} | {result} {pnl_str}")
-    print(f"   Capital: ${old_capital:.2f} → ${state.capital:.2f}")
+    print(f"   Capital: ${old_capital:.2f} → ${state.capital:.2f} | Next round shares: {state.next_buy_shares}")
 
 async def main():
     state = load_state()
@@ -200,7 +209,7 @@ async def main():
                     else:
                         await asyncio.sleep(POLL_INTERVAL)
                         continue  # no previous winner yet, skip buying
-                    shares = FIRST_BUY_SHARES
+                    shares = state.next_buy_shares
                     cost = shares * price
                     if side == "up":
                         state.up_shares += shares
