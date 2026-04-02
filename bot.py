@@ -127,20 +127,12 @@ async def main():
                             prices = json.loads(prev_market.get("outcomePrices", "[0.5,0.5]"))
                             up_final = float(prices[0])
                             down_final = float(prices[1])
-                            if up_final >= 0.80:
-                                if state.up_shares > 0 or state.down_shares > 0:
-                                    payout = state.up_shares * 1.0
-                                    await settle_pnl(state, payout, f"📊 PREV WINDOW SETTLED (UP wins)")
-                                state.prev_winner = "up"
-                                print(f"📌 Next window direction: BUY UP (prev winner)")
-                            elif down_final >= 0.80:
-                                if state.up_shares > 0 or state.down_shares > 0:
-                                    payout = state.down_shares * 1.0
-                                    await settle_pnl(state, payout, f"📊 PREV WINDOW SETTLED (DOWN wins)")
-                                state.prev_winner = "down"
-                                print(f"📌 Next window direction: BUY DOWN (prev winner)")
-                            else:
-                                print(f"⚠️  Could not determine prev window winner")
+                            winner = "up" if up_final >= down_final else "down"
+                            if state.up_shares > 0 or state.down_shares > 0:
+                                payout = state.up_shares * 1.0 if winner == "up" else state.down_shares * 1.0
+                                await settle_pnl(state, payout, f"📊 PREV WINDOW SETTLED ({winner.upper()} wins | UP:{up_final:.3f} DOWN:{down_final:.3f})")
+                            state.prev_winner = winner
+                            print(f"📌 Next window direction: BUY {winner.upper()} (prev winner | UP:{up_final:.3f} DOWN:{down_final:.3f})")
                         except:
                             pass
 
