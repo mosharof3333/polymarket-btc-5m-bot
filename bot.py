@@ -205,12 +205,9 @@ async def main():
                     elif state.prev_winner == "down":
                         side = "down"
                         price = down_ask
-                    elif up_ask <= down_ask:
-                        side = "up"
-                        price = up_ask
                     else:
-                        side = "down"
-                        price = down_ask
+                        await asyncio.sleep(POLL_INTERVAL)
+                        continue  # no previous winner yet, skip buying
                     cost = shares * price
                     if side == "up":
                         state.up_shares += shares
@@ -221,8 +218,7 @@ async def main():
                     state.buy_step += 1
                     state.next_buy_time = now + BUY_INTERVAL
                     save_state(state)
-                    reason = f"prev winner" if state.prev_winner else "cheaper side"
-                    print(f"🛒 BUY {side.upper()} {shares} @ {price:.4f} | Cost ${cost:.2f} | {reason} | Next in 30s")
+                    print(f"🛒 BUY {side.upper()} {shares} @ {price:.4f} | Cost ${cost:.2f} | following prev winner | Next in 30s")
 
             await asyncio.sleep(POLL_INTERVAL)
 
