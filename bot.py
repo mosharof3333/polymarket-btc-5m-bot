@@ -160,12 +160,13 @@ async def sell_side(state, session, side, reason="TP"):
         return
     bid      = await get_best_bid(session, token)
     proceeds = shares * bid
-    net      = proceeds - cost
-    state.capital += net
+    # cost was already deducted from capital at buy time — add full proceeds back
+    net      = proceeds - cost   # for display only
+    state.capital += proceeds
     pnl = f"+${net:.2f}" if net >= 0 else f"-${abs(net):.2f}"
     label = side_s(side, f"{side.upper()} {shares:.4f} @ {bid:.4f}")
     icon  = "🎯" if reason == "TP" else "⏰"
-    print(f"{icon} {reason} — sell {label} | cost ${cost:.2f} | net {pnl} | Capital {cap(state.capital)}")
+    print(f"{icon} {reason} — sell {label} | proceeds ${proceeds:.2f} | cost ${cost:.2f} | net {pnl} | Capital {cap(state.capital)}")
     if side == "up":
         state.up_shares = state.up_cost = 0.0
         state.up_done = True
@@ -175,10 +176,8 @@ async def sell_side(state, session, side, reason="TP"):
     save_state(state)
 
 def rt_capital(state, up_ask, dn_ask):
-    """Mark-to-market capital: cash after all trades + unrealized position value."""
-    unrealized = state.up_shares * up_ask + state.dn_shares * dn_ask
-    open_cost  = state.up_cost + state.dn_cost
-    return state.capital - open_cost + unrealized
+    """Mark-to-market capital: settled cash (cost already deducted) + current position value."""
+    return state.capital + state.up_shares * up_ask + state.dn_shares * dn_ask
 
 def both_closed(state):
     """True when all open positions are done."""
