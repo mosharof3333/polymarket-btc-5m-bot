@@ -5,8 +5,7 @@ import time
 import os
 
 STATE_FILE = "bot_state.json"
-FIRST_BUY_SHARES = 10
-SHARES_INCREMENT = 5
+FIRST_BUY_SHARES = 20
 BUY_INTERVAL = 30       # buy every 30 seconds
 BUY_UNTIL = 270         # stop buying at 4:30 (270 seconds into window)
 TAKE_PROFIT = 0.99      # sell all when either side hits this
@@ -193,7 +192,7 @@ async def main():
             now = int(time.time())
             if not state.took_profit and elapsed <= BUY_UNTIL:
                 if state.next_buy_time is None or now >= state.next_buy_time:
-                    shares = FIRST_BUY_SHARES + state.buy_step * SHARES_INCREMENT
+                    shares = FIRST_BUY_SHARES
                     if up_ask <= down_ask:
                         side = "up"
                         price = up_ask
@@ -212,8 +211,7 @@ async def main():
                         state.buy_step += 1
                         state.next_buy_time = now + BUY_INTERVAL
                         save_state(state)
-                        next_shares = FIRST_BUY_SHARES + state.buy_step * SHARES_INCREMENT
-                        print(f"🛒 BUY {side.upper()} {shares} @ {price:.4f} | Cost ${cost:.2f} | Capital ${state.capital:.2f} | Next buy: {next_shares} shares in 30s")
+                        print(f"🛒 BUY {side.upper()} {shares} @ {price:.4f} | Cost ${cost:.2f} | Capital ${state.capital:.2f} | Next buy in 30s")
                     else:
                         print(f"⚠️  Insufficient capital for {shares} shares @ ${price:.4f} (need ${cost:.2f})")
 
