@@ -5,27 +5,27 @@ import time
 import os
 
 STATE_FILE = "bot_state.json"
-BASE_SHARES = 10
+FIRST_BUY_SHARES = 10
+SHARES_INCREMENT = 5
+BUY_INTERVAL = 30       # buy every 30 seconds
+BUY_UNTIL = 270         # stop buying at 4:30 (270 seconds into window)
+TAKE_PROFIT = 0.99      # sell all when either side hits this
 POLL_INTERVAL = 0.15
 CLOB_BASE = "https://clob.polymarket.com"
-PRINT_PRICE_EVERY = 8
-
-MAX_FLIPS = 4
-STOP_LOSS_PRICE = 0.45  # Stop loss on last flip position
+PRINT_PRICE_EVERY = 20
 
 class BotState:
     def __init__(self):
         self.capital = 1000.0
         self.last_window_ts = None
-        self.current_side = None
         self.up_shares = 0.0
         self.down_shares = 0.0
         self.up_cost = 0.0
         self.down_cost = 0.0
-        self.last_buy_size = 0.0
+        self.buy_step = 0
+        self.next_buy_time = None
+        self.took_profit = False
         self.poll_count = 0
-        self.flip_count = 0
-        self.force_sold = False
 
 def load_state():
     if os.path.exists(STATE_FILE):
@@ -34,14 +34,13 @@ def load_state():
             state = BotState()
             state.capital = data.get("capital", 1000.0)
             state.last_window_ts = data.get("last_window_ts")
-            state.current_side = data.get("current_side")
             state.up_shares = data.get("up_shares", 0.0)
             state.down_shares = data.get("down_shares", 0.0)
             state.up_cost = data.get("up_cost", 0.0)
             state.down_cost = data.get("down_cost", 0.0)
-            state.last_buy_size = data.get("last_buy_size", 0.0)
-            state.flip_count = data.get("flip_count", 0)
-            state.force_sold = data.get("force_sold", False)
+            state.buy_step = data.get("buy_step", 0)
+            state.next_buy_time = data.get("next_buy_time")
+            state.took_profit = data.get("took_profit", False)
             return state
     return BotState()
 
@@ -49,14 +48,13 @@ def save_state(state):
     data = {
         "capital": round(state.capital, 4),
         "last_window_ts": state.last_window_ts,
-        "current_side": state.current_side,
         "up_shares": state.up_shares,
         "down_shares": state.down_shares,
         "up_cost": state.up_cost,
         "down_cost": state.down_cost,
-        "last_buy_size": state.last_buy_size,
-        "flip_count": state.flip_count,
-        "force_sold": state.force_sold,
+        "buy_step": state.buy_step,
+        "next_buy_time": state.next_buy_time,
+        "took_profit": state.took_profit,
     }
     with open(STATE_FILE, "w") as f:
         json.dump(data, f, indent=2)
@@ -97,19 +95,31 @@ async def get_best_bid(session, token_id):
         pass
     return 0.01
 
+async def settle_pnl(state, payout, label):
+    total_cost = state.up_cost + state.down_cost
+    net_pnl = payout - total_cost
+    old_capital = state.capital
+    state.capital += payout
+    result = "WIN" if net_pnl > 0 else "LOSS"
+    pnl_str = f"+${net_pnl:.2f}" if net_pnl >= 0 else f"-${abs(net_pnl):.2f}"
+    print(f"{label}")
+    print(f"   UP shares: {state.up_shares:.0f} (cost ${state.up_cost:.2f}) | DOWN shares: {state.down_shares:.0f} (cost ${state.down_cost:.2f})")
+    print(f"   Payout: ${payout:.2f} | Total cost: ${total_cost:.2f} | {result} {pnl_str}")
+    print(f"   Capital: ${old_capital:.2f} → ${state.capital:.2f}")
+
 async def main():
     state = load_state()
-    print(f"🚀 BTC 5m Doubling Bot — Math & Payout finally fixed")
+    print(f"🚀 BTC 5m Accumulation Bot started | Capital ${state.capital:.2f}")
 
     async with aiohttp.ClientSession() as session:
         while True:
             now_ts = (int(time.time()) // 300) * 300
             slug = f"btc-updown-5m-{now_ts}"
 
-            # New window reset
+            # New window
             if state.last_window_ts != now_ts:
                 if state.last_window_ts is not None and (state.up_shares > 0 or state.down_shares > 0):
-                    # Settle previous window P&L before resetting
+                    # Settle previous window
                     prev_slug = f"btc-updown-5m-{state.last_window_ts}"
                     prev_data = await fetch_gamma(session, prev_slug)
                     settled = False
@@ -120,42 +130,27 @@ async def main():
                             up_final = float(prices[0])
                             down_final = float(prices[1])
                             if up_final >= 0.80:
-                                winner = "UP"
                                 payout = state.up_shares * 1.0
+                                await settle_pnl(state, payout, f"📊 PREV WINDOW SETTLED (UP wins)")
+                                settled = True
                             elif down_final >= 0.80:
-                                winner = "DOWN"
                                 payout = state.down_shares * 1.0
-                            else:
-                                # Market not settled yet, skip — will retry next loop
-                                payout = None
-                            if payout is not None:
-                                total_cost = state.up_cost + state.down_cost
-                                net_pnl = payout - total_cost
-                                old_capital = state.capital
-                                state.capital += payout
-                                result = "WIN" if net_pnl > 0 else "LOSS"
-                                pnl_str = f"+${net_pnl:.2f}" if net_pnl >= 0 else f"-${abs(net_pnl):.2f}"
-                                print(f"📊 PREV WINDOW SETTLED ({winner} wins)")
-                                print(f"   UP shares: {state.up_shares:.0f} | DOWN shares: {state.down_shares:.0f}")
-                                print(f"   Payout: ${payout:.2f} | Total cost: ${total_cost:.2f} | {result} {pnl_str}")
-                                print(f"   Capital: ${old_capital:.2f} → ${state.capital:.2f}")
+                                await settle_pnl(state, payout, f"📊 PREV WINDOW SETTLED (DOWN wins)")
                                 settled = True
                         except:
                             pass
                     if not settled:
                         print(f"⚠️  Could not settle prev window — positions dropped, capital unchanged")
-                elif state.last_window_ts is not None:
-                    print(f"✅ New 5m window started — no open positions")
+
                 state.last_window_ts = now_ts
-                state.current_side = None
                 state.up_shares = state.down_shares = 0.0
                 state.up_cost = state.down_cost = 0.0
-                state.last_buy_size = 0.0
+                state.buy_step = 0
+                state.next_buy_time = None
+                state.took_profit = False
                 state.poll_count = 0
-                state.flip_count = 0
-                state.force_sold = False
                 save_state(state)
-                print(f"🌟 NEW WINDOW: {slug}")
+                print(f"🌟 NEW WINDOW: {slug} | Capital ${state.capital:.2f}")
 
             event_data = await fetch_gamma(session, slug)
             if not event_data:
@@ -171,195 +166,56 @@ async def main():
             up_token = clob_ids[0] if clob_ids else None
             down_token = clob_ids[1] if len(clob_ids) > 1 else None
 
-            # Immediate resolution when any side hits 0.99+
-            resolved = False
-            up_final = 0.5
-            down_final = 0.5
-            if "outcomePrices" in market:
-                try:
-                    prices = json.loads(market["outcomePrices"])
-                    up_final = float(prices[0])
-                    down_final = float(prices[1])
-                    if up_final >= 0.99 or down_final >= 0.99:
-                        resolved = True
-                except:
-                    pass
-
-            if resolved:
-                # Calculate payout BEFORE resetting shares
-                if up_final >= 0.99:
-                    winner = "UP"
-                    payout = state.up_shares * 1.0
-                else:
-                    winner = "DOWN"
-                    payout = state.down_shares * 1.0
-
-                total_cost = state.up_cost + state.down_cost
-                net_pnl = payout - total_cost
-
-                old_capital = state.capital
-                state.capital += payout
-
-                # Save the new capital FIRST
-                save_state(state)
-
-                result = "WIN" if net_pnl > 0 else "LOSS"
-                pnl_str = f"+${net_pnl:.2f}" if net_pnl >= 0 else f"-${abs(net_pnl):.2f}"
-
-                print(f"🏁 WINDOW RESOLVED (side hit 0.99+)!")
-                print(f"   UP shares: {state.up_shares:.0f} | DOWN shares: {state.down_shares:.0f}")
-                print(f"   Outcome → UP: ${up_final:.3f} | DOWN: ${down_final:.3f}")
-                print(f"   RESULT: **{result}** ({winner} wins) | P&L: {pnl_str}")
-                print(f"   Capital: ${old_capital:.2f} → ${state.capital:.2f}")
-
-                # Now safe to reset shares
-                state.up_shares = state.down_shares = 0.0
-                state.up_cost = state.down_cost = 0.0
-                state.current_side = None
-                state.last_buy_size = 0.0
-                state.flip_count = 0
-                state.force_sold = False
-                state.last_window_ts = None  # Force fresh next window
-                save_state(state)
-
-                await asyncio.sleep(3)
-                continue
-
-            # Live prices
             up_ask = await get_best_ask(session, up_token)
             down_ask = await get_best_ask(session, down_token)
 
             state.poll_count += 1
+            if state.poll_count % PRINT_PRICE_EVERY == 0:
+                elapsed = int(time.time()) - state.last_window_ts
+                print(f"LIVE T+{elapsed}s | Up {up_ask:.4f} | Down {down_ask:.4f} | UP {state.up_shares:.0f} shares | DOWN {state.down_shares:.0f} shares | Capital ${state.capital:.2f}")
 
-            if state.poll_count % PRINT_PRICE_EVERY == 0 or state.current_side is None:
-                side_status = f" | Holding {state.current_side.upper()}" if state.current_side else ""
-                print(f"LIVE: Up {up_ask:.4f} | Down {down_ask:.4f}{side_status} | Capital ${state.capital:.2f}")
-
-            # Force sell immediately when any side hits 0.99
-            if not state.force_sold and (state.up_shares > 0 or state.down_shares > 0):
-                if up_ask >= 0.99 or down_ask >= 0.99:
+            # Take profit when either side hits 0.99
+            if not state.took_profit and (state.up_shares > 0 or state.down_shares > 0):
+                if up_ask >= TAKE_PROFIT or down_ask >= TAKE_PROFIT:
                     up_bid = await get_best_bid(session, up_token)
                     down_bid = await get_best_bid(session, down_token)
-                    proceeds = (state.up_shares * min(up_bid, 0.99)) + (state.down_shares * min(down_bid, 0.99))
-                    total_cost = state.up_cost + state.down_cost
-                    net_pnl = proceeds - total_cost
-                    old_capital = state.capital
-                    state.capital += proceeds
-                    state.force_sold = True
-                    result = "WIN" if net_pnl > 0 else "LOSS"
-                    pnl_str = f"+${net_pnl:.2f}" if net_pnl >= 0 else f"-${abs(net_pnl):.2f}"
-                    print(f"🚨 PRICE HIT 0.99 — FORCE SELL ALL | UP {state.up_shares:.0f} @ {up_bid:.4f} | DOWN {state.down_shares:.0f} @ {down_bid:.4f}")
-                    print(f"   Proceeds: ${proceeds:.2f} | Cost: ${total_cost:.2f} | {result} {pnl_str}")
-                    print(f"   Capital: ${old_capital:.2f} → ${state.capital:.2f}")
+                    payout = (state.up_shares * min(up_bid, 0.99)) + (state.down_shares * min(down_bid, 0.99))
+                    await settle_pnl(state, payout, f"🎯 TAKE PROFIT — {'UP' if up_ask >= TAKE_PROFIT else 'DOWN'} hit {TAKE_PROFIT}")
                     state.up_shares = state.down_shares = 0.0
                     state.up_cost = state.down_cost = 0.0
-                    state.current_side = None
+                    state.took_profit = True
                     save_state(state)
                     await asyncio.sleep(POLL_INTERVAL)
                     continue
 
-            # Your strategy (10 → double on flips, max 4 flips)
-            if state.current_side is None and not state.force_sold:
-                if up_ask >= 0.60:
-                    shares = BASE_SHARES
-                    cost = shares * up_ask
+            # Buy cheaper side every 30s until 4:30
+            elapsed = int(time.time()) - state.last_window_ts
+            now = int(time.time())
+            if not state.took_profit and elapsed <= BUY_UNTIL:
+                if state.next_buy_time is None or now >= state.next_buy_time:
+                    shares = FIRST_BUY_SHARES + state.buy_step * SHARES_INCREMENT
+                    if up_ask <= down_ask:
+                        side = "up"
+                        price = up_ask
+                    else:
+                        side = "down"
+                        price = down_ask
+                    cost = shares * price
                     if state.capital >= cost:
-                        state.up_shares += shares
-                        state.up_cost += cost
+                        if side == "up":
+                            state.up_shares += shares
+                            state.up_cost += cost
+                        else:
+                            state.down_shares += shares
+                            state.down_cost += cost
                         state.capital -= cost
-                        state.current_side = "up"
-                        state.last_buy_size = shares
+                        state.buy_step += 1
+                        state.next_buy_time = now + BUY_INTERVAL
                         save_state(state)
-                        print(f"📈 FIRST BUY UP {shares} @ {up_ask:.4f} | Cost ${cost:.2f} | Capital ${state.capital:.2f}")
-                elif down_ask >= 0.60:
-                    shares = BASE_SHARES
-                    cost = shares * down_ask
-                    if state.capital >= cost:
-                        state.down_shares += shares
-                        state.down_cost += cost
-                        state.capital -= cost
-                        state.current_side = "down"
-                        state.last_buy_size = shares
-                        save_state(state)
-                        print(f"📉 FIRST BUY DOWN {shares} @ {down_ask:.4f} | Cost ${cost:.2f} | Capital ${state.capital:.2f}")
-
-            elif state.current_side == "up" and down_ask >= 0.60 and state.flip_count < MAX_FLIPS:
-                new_shares = int(state.last_buy_size * 2)
-                cost = new_shares * down_ask
-                if state.capital >= cost:
-                    # Sell previous UP position first
-                    up_bid = await get_best_bid(session, up_token)
-                    sell_proceeds = state.up_shares * up_bid
-                    state.capital += sell_proceeds
-                    print(f"💸 SELL UP {state.up_shares:.0f} @ {up_bid:.4f} | Proceeds ${sell_proceeds:.2f}")
-                    state.up_shares = 0.0
-                    state.up_cost = 0.0
-                    # Buy new DOWN position
-                    state.down_shares += new_shares
-                    state.down_cost += cost
-                    state.capital -= cost
-                    state.current_side = "down"
-                    state.last_buy_size = new_shares
-                    state.flip_count += 1
-                    save_state(state)
-                    print(f"🔄 FLIP DOWN {new_shares} @ {down_ask:.4f} | Cost ${cost:.2f} | Capital ${state.capital:.2f} | Flip {state.flip_count}/{MAX_FLIPS}")
-            elif state.current_side == "up" and state.flip_count >= MAX_FLIPS:
-                if up_ask <= STOP_LOSS_PRICE:
-                    up_bid = await get_best_bid(session, up_token)
-                    down_bid = await get_best_bid(session, down_token)
-                    proceeds = (state.up_shares * up_bid) + (state.down_shares * down_bid)
-                    total_cost = state.up_cost + state.down_cost
-                    net_pnl = proceeds - total_cost
-                    old_capital = state.capital
-                    state.capital += proceeds
-                    state.force_sold = True
-                    pnl_str = f"+${net_pnl:.2f}" if net_pnl >= 0 else f"-${abs(net_pnl):.2f}"
-                    print(f"🛑 STOP LOSS UP @ {up_ask:.4f} | UP {state.up_shares:.0f} @ {up_bid:.4f} | DOWN {state.down_shares:.0f} @ {down_bid:.4f}")
-                    print(f"   Proceeds: ${proceeds:.2f} | Cost: ${total_cost:.2f} | LOSS {pnl_str}")
-                    print(f"   Capital: ${old_capital:.2f} → ${state.capital:.2f}")
-                    state.up_shares = state.down_shares = 0.0
-                    state.up_cost = state.down_cost = 0.0
-                    state.current_side = None
-                    save_state(state)
-
-            elif state.current_side == "down" and up_ask >= 0.60 and state.flip_count < MAX_FLIPS:
-                new_shares = int(state.last_buy_size * 2)
-                cost = new_shares * up_ask
-                if state.capital >= cost:
-                    # Sell previous DOWN position first
-                    down_bid = await get_best_bid(session, down_token)
-                    sell_proceeds = state.down_shares * down_bid
-                    state.capital += sell_proceeds
-                    print(f"💸 SELL DOWN {state.down_shares:.0f} @ {down_bid:.4f} | Proceeds ${sell_proceeds:.2f}")
-                    state.down_shares = 0.0
-                    state.down_cost = 0.0
-                    # Buy new UP position
-                    state.up_shares += new_shares
-                    state.up_cost += cost
-                    state.capital -= cost
-                    state.current_side = "up"
-                    state.last_buy_size = new_shares
-                    state.flip_count += 1
-                    save_state(state)
-                    print(f"🔄 FLIP UP {new_shares} @ {up_ask:.4f} | Cost ${cost:.2f} | Capital ${state.capital:.2f} | Flip {state.flip_count}/{MAX_FLIPS}")
-            elif state.current_side == "down" and state.flip_count >= MAX_FLIPS:
-                if down_ask <= STOP_LOSS_PRICE:
-                    up_bid = await get_best_bid(session, up_token)
-                    down_bid = await get_best_bid(session, down_token)
-                    proceeds = (state.up_shares * up_bid) + (state.down_shares * down_bid)
-                    total_cost = state.up_cost + state.down_cost
-                    net_pnl = proceeds - total_cost
-                    old_capital = state.capital
-                    state.capital += proceeds
-                    state.force_sold = True
-                    pnl_str = f"+${net_pnl:.2f}" if net_pnl >= 0 else f"-${abs(net_pnl):.2f}"
-                    print(f"🛑 STOP LOSS DOWN @ {down_ask:.4f} | UP {state.up_shares:.0f} @ {up_bid:.4f} | DOWN {state.down_shares:.0f} @ {down_bid:.4f}")
-                    print(f"   Proceeds: ${proceeds:.2f} | Cost: ${total_cost:.2f} | LOSS {pnl_str}")
-                    print(f"   Capital: ${old_capital:.2f} → ${state.capital:.2f}")
-                    state.up_shares = state.down_shares = 0.0
-                    state.up_cost = state.down_cost = 0.0
-                    state.current_side = None
-                    save_state(state)
+                        next_shares = FIRST_BUY_SHARES + state.buy_step * SHARES_INCREMENT
+                        print(f"🛒 BUY {side.upper()} {shares} @ {price:.4f} | Cost ${cost:.2f} | Capital ${state.capital:.2f} | Next buy: {next_shares} shares in 30s")
+                    else:
+                        print(f"⚠️  Insufficient capital for {shares} shares @ ${price:.4f} (need ${cost:.2f})")
 
             await asyncio.sleep(POLL_INTERVAL)
 
