@@ -142,6 +142,52 @@ def token_for(state, side):
 
 # ── trade helpers ─────────────────────────────────────────────────────────────
 
+def settle_side_at_dollar(state, side, winner):
+    """Settle one side at $1/share (winner) or $0/share (loser). Cost already deducted."""
+    if side == state.cheap_side:
+        shares = state.cheap_shares
+        cost   = state.cheap_cost
+    else:
+        shares = state.strong_shares
+        cost   = state.strong_cost
+    if shares <= 0:
+        return
+    payout = shares * (1.0 if side == winner else 0.0)
+    net    = payout - cost
+    state.capital += payout
+    pnl  = f"+${net:.2f}" if net >= 0 else f"-${abs(net):.2f}"
+    icon = "🏆" if side == winner else "💀"
+    print(f"{icon} FINAL SETTLE — {side_s(side, f'{side.upper()} {shares:.4f} × $1.00' if side==winner else f'{side.upper()} {shares:.4f} × $0')} "
+          f"| cost ${cost:.2f} | net {pnl} | Capital {cap(state.capital)}")
+    if side == state.cheap_side:
+        state.cheap_shares = state.cheap_cost = 0.0
+        state.cheap_done   = True
+    else:
+        state.strong_shares = state.strong_cost = 0.0
+        state.strong_done   = True
+
+async def check_final_10s(state, session, up_ask, dn_ask):
+    """
+    In the last 10 seconds, if either side >= 0.80 declare it the winner
+    and settle all open positions at $1 (winner) or $0 (loser).
+    Returns True if settlement happened.
+    """
+    if up_ask >= 0.80:
+        winner = "up"
+    elif dn_ask >= 0.80:
+        winner = "down"
+    else:
+        return False   # neither side qualifies yet
+
+    print(f"⏱️  LAST 10s — {side_s(winner, f'{winner.upper()} @ {up_ask if winner==\"up\" else dn_ask:.4f}')} >= 0.80 → settling all at $1/$0")
+    if state.cheap_shares > 0 and not state.cheap_done:
+        settle_side_at_dollar(state, state.cheap_side, winner)
+    if state.second_triggered and state.strong_shares > 0 and not state.strong_done:
+        settle_side_at_dollar(state, state.strong_side, winner)
+    state.phase = "done"
+    save_state(state)
+    return True
+
 async def buy_position(state, session, side, bet, ask, label=""):
     shares = bet / ask
     state.capital -= bet
@@ -265,15 +311,21 @@ async def main():
 
             # ── PHASE: first_active ───────────────────────────────────────
             elif state.phase == "first_active":
+                up_ask    = await get_best_ask(session, state.up_token)
+                dn_ask    = await get_best_ask(session, state.down_token)
+
+                # last 10 seconds: settle at $1/$0 if a side is >= 0.80
+                if state.trade_window and now >= state.trade_window + 290:
+                    if await check_final_10s(state, session, up_ask, dn_ask):
+                        await asyncio.sleep(POLL_INTERVAL)
+                        continue
+
                 if state.trade_window and now >= state.trade_window + 300:
                     await sell_position(state, session, state.cheap_side, reason="EXPIRY")
                     state.phase = "done"
                     save_state(state)
                     await asyncio.sleep(POLL_INTERVAL)
                     continue
-
-                up_ask    = await get_best_ask(session, state.up_token)
-                dn_ask    = await get_best_ask(session, state.down_token)
                 cheap_ask = up_ask if state.cheap_side == "up" else dn_ask
                 rc        = state.capital + state.cheap_shares * cheap_ask
 
@@ -303,10 +355,16 @@ async def main():
 
             # ── PHASE: both_active ────────────────────────────────────────
             elif state.phase == "both_active":
-                expired = state.trade_window and now >= state.trade_window + 300
-
                 up_ask     = await get_best_ask(session, state.up_token)
                 dn_ask     = await get_best_ask(session, state.down_token)
+
+                # last 10 seconds: settle at $1/$0 if a side is >= 0.80
+                if state.trade_window and now >= state.trade_window + 290:
+                    if await check_final_10s(state, session, up_ask, dn_ask):
+                        await asyncio.sleep(POLL_INTERVAL)
+                        continue
+
+                expired = state.trade_window and now >= state.trade_window + 300
                 cheap_ask  = up_ask if state.cheap_side  == "up" else dn_ask
                 strong_ask = up_ask if state.strong_side == "up" else dn_ask
                 rc = (state.capital
