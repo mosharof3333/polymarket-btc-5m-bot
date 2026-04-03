@@ -5,8 +5,10 @@ import time
 import os
 
 STATE_FILE           = "bot_state.json"
-TRIGGER_CHEAP        = 0.30   # buy whichever side hits this first
+TRIGGER_CHEAP         = 0.30   # buy whichever side hits this first
+SL_CHEAP              = 0.07   # force sell first buy if price drops here
 SECOND_TRIGGER_STRONG = 0.90   # buy strong side when it reaches this price
+SL_STRONG             = 0.40   # force sell second buy if price drops here
 FIRST_BET            = 10.0   # $ on cheap side at 0.20
 SECOND_BET           = 150.0  # $ on strong side at ~0.90
 TP                   = 0.99   # take profit for both positions
@@ -413,7 +415,14 @@ async def main():
                     state.phase = "done"
                     save_state(state)
 
-                # Second trigger: cheap side dropped to 0.10 → buy strong side
+                # SL on cheap side
+                elif cheap_ask <= SL_CHEAP:
+                    print(f"🛑 SL — {side_s(state.cheap_side, f'{state.cheap_side.upper()} @ {cheap_ask:.4f}')} <= {SL_CHEAP} | force sell")
+                    await sell_position(state, session, state.cheap_side, reason="SL")
+                    state.phase = "done"
+                    save_state(state)
+
+                # Second trigger: strong side reached 0.90 → buy strong side
                 elif strong_ask >= SECOND_TRIGGER_STRONG and not state.second_triggered:
                     strong_ask = dn_ask if state.strong_side == "down" else up_ask
                     print(f"📉 2ND TRIGGER — {side_s(state.strong_side, f'{state.strong_side.upper()} reached {strong_ask:.4f}')} >= {SECOND_TRIGGER_STRONG} "
@@ -461,6 +470,11 @@ async def main():
                     print(f"🎯 TP — {side_s(state.strong_side, state.strong_side.upper())} hit {strong_ask:.4f}!")
                     await sell_position(state, session, state.strong_side, reason="TP")
                     state.strong_exited_tp = True
+
+                # strong side SL
+                elif not state.strong_done and state.strong_shares > 0 and strong_ask <= SL_STRONG:
+                    print(f"🛑 SL — {side_s(state.strong_side, f'{state.strong_side.upper()} @ {strong_ask:.4f}')} <= {SL_STRONG} | force sell")
+                    await sell_position(state, session, state.strong_side, reason="SL")
 
                 # expiry: settle remaining at $1/$0 by winner price
                 if expired:
