@@ -390,8 +390,9 @@ async def main():
                     await check_final_10s(state, session, up_ask, dn_ask)
                     await asyncio.sleep(POLL_INTERVAL)
                     continue
-                cheap_ask = up_ask if state.cheap_side == "up" else dn_ask
-                rc        = state.capital + state.cheap_shares * cheap_ask
+                cheap_ask  = up_ask if state.cheap_side  == "up" else dn_ask
+                strong_ask = up_ask if state.strong_side == "up" else dn_ask
+                rc         = state.capital + state.cheap_shares * cheap_ask
 
                 if state.poll_count % PRINT_EVERY == 0:
                     unreal = state.cheap_shares * cheap_ask - state.cheap_cost
