@@ -6,7 +6,7 @@ import os
 
 STATE_FILE           = "bot_state.json"
 TRIGGER_CHEAP        = 0.20   # buy whichever side hits this first
-SECOND_TRIGGER_CHEAP = 0.10   # if cheap side drops here, also buy the strong side
+SECOND_TRIGGER_STRONG = 0.90   # buy strong side when it reaches this price
 FIRST_BET            = 10.0   # $ on cheap side at 0.20
 SECOND_BET           = 150.0  # $ on strong side at ~0.90
 TP                   = 0.99   # take profit for both positions
@@ -301,7 +301,7 @@ async def main():
     state = load_state()
     print(f"🚀 BTC 5m Bot | Capital {cap(state.capital)} | Phase: {state.phase}")
     print(f"   First: whichever side hits {TRIGGER_CHEAP} → buy ${FIRST_BET}")
-    print(f"   Second: if that side drops to {SECOND_TRIGGER_CHEAP} → buy opposite ${SECOND_BET}")
+    print(f"   Second: if opposite side reaches {SECOND_TRIGGER_STRONG} → buy it ${SECOND_BET}")
     print(f"   TP @ {TP} for both | no stop loss")
     print_stats(state)
 
@@ -364,7 +364,7 @@ async def main():
                     await buy_position(state, session, "up", FIRST_BET, up_ask)
                     state.phase = "first_active"
                     save_state(state)
-                    print(f"   If {up_s('UP')} drops to {SECOND_TRIGGER_CHEAP}, will buy {dn_s('DN')} ${SECOND_BET} | TP @ {TP}")
+                    print(f"   If {dn_s('DN')} reaches {SECOND_TRIGGER_STRONG}, will buy {dn_s('DN')} ${SECOND_BET} | TP @ {TP}")
 
                 elif dn_ask <= TRIGGER_CHEAP:
                     state.cheap_side  = "down"
@@ -373,7 +373,7 @@ async def main():
                     await buy_position(state, session, "down", FIRST_BET, dn_ask)
                     state.phase = "first_active"
                     save_state(state)
-                    print(f"   If {dn_s('DN')} drops to {SECOND_TRIGGER_CHEAP}, will buy {up_s('UP')} ${SECOND_BET} | TP @ {TP}")
+                    print(f"   If {up_s('UP')} reaches {SECOND_TRIGGER_STRONG}, will buy {up_s('UP')} ${SECOND_BET} | TP @ {TP}")
 
             # ── PHASE: first_active ───────────────────────────────────────
             elif state.phase == "first_active":
@@ -398,7 +398,7 @@ async def main():
                     u_str  = f"+${unreal:.2f}" if unreal >= 0 else f"-${abs(unreal):.2f}"
                     print(f"📊 {side_s(state.cheap_side, f'{state.cheap_side.upper()} {cheap_ask:.4f}')} "
                           f"| {state.cheap_shares:.4f} shares | unrealized {u_str} "
-                          f"| TP @ {TP} | 2nd trigger @ {SECOND_TRIGGER_CHEAP} | Real-time Capital {cap(rc)}")
+                          f"| TP @ {TP} | 2nd trigger if {side_s(state.strong_side, state.strong_side.upper() if state.strong_side else '?')} >= {SECOND_TRIGGER_STRONG} | Real-time Capital {cap(rc)}")
 
                 # TP on cheap side
                 if cheap_ask >= TP:
@@ -409,10 +409,10 @@ async def main():
                     save_state(state)
 
                 # Second trigger: cheap side dropped to 0.10 → buy strong side
-                elif cheap_ask <= SECOND_TRIGGER_CHEAP and not state.second_triggered:
+                elif strong_ask >= SECOND_TRIGGER_STRONG and not state.second_triggered:
                     strong_ask = dn_ask if state.strong_side == "down" else up_ask
-                    print(f"📉 2ND TRIGGER — {side_s(state.cheap_side, f'{state.cheap_side.upper()} dropped to {cheap_ask:.4f}')} "
-                          f"| buying strong side {side_s(state.strong_side, f'{state.strong_side.upper()} @ {strong_ask:.4f}')} ${SECOND_BET}")
+                    print(f"📉 2ND TRIGGER — {side_s(state.strong_side, f'{state.strong_side.upper()} reached {strong_ask:.4f}')} >= {SECOND_TRIGGER_STRONG} "
+                          f"| buying {side_s(state.strong_side, f'{state.strong_side.upper()} @ {strong_ask:.4f}')} ${SECOND_BET}")
                     await buy_position(state, session, state.strong_side, SECOND_BET, strong_ask)
                     state.second_triggered = True
                     state.stat_second_triggered += 1
