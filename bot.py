@@ -10,9 +10,10 @@ SECOND_TRIGGER_CHEAP = 0.10   # if cheap side drops here, also buy the strong si
 FIRST_BET            = 10.0   # $ on cheap side at 0.20
 SECOND_BET           = 150.0  # $ on strong side at ~0.90
 TP                   = 0.99   # take profit for both positions
-POLL_INTERVAL        = 0.15
+POLL_INTERVAL        = 0.05   # poll every 50ms for fast price detection
+FINAL_10S_THRESHOLD  = 0.55   # settle at $1/$0 if any side crosses this in last 10s
 CLOB_BASE            = "https://clob.polymarket.com"
-PRINT_EVERY          = 20
+PRINT_EVERY          = 60     # ~3s at 50ms polling
 
 GREEN      = "\033[32m"
 RED        = "\033[31m"
@@ -168,21 +169,41 @@ def settle_side_at_dollar(state, side, winner):
         state.strong_shares = state.strong_cost = 0.0
         state.strong_done   = True
 
+def determine_winner(up_ask, dn_ask, threshold=None):
+    """
+    Return winner side string based on price.
+    If threshold given: only declare winner if a side exceeds it.
+    Otherwise always pick the higher side.
+    """
+    if threshold:
+        if up_ask >= threshold:
+            return "up"
+        if dn_ask >= threshold:
+            return "down"
+        return None
+    return "up" if up_ask >= dn_ask else "down"
+
 async def check_final_10s(state, session, up_ask, dn_ask):
     """
-    In the last 10 seconds, if either side >= 0.80 declare it the winner
-    and settle all open positions at $1 (winner) or $0 (loser).
+    In the last 10 seconds: if either side >= FINAL_10S_THRESHOLD settle at $1/$0.
+    At hard expiry (T+300): always settle by picking the higher-priced side.
     Returns True if settlement happened.
     """
-    if up_ask >= 0.80:
-        winner = "up"
-    elif dn_ask >= 0.80:
-        winner = "down"
+    now_expired = state.trade_window and int(time.time()) >= state.trade_window + 300
+
+    if now_expired:
+        # Hard expiry: pick whichever side is higher, no threshold required
+        winner = determine_winner(up_ask, dn_ask)
     else:
-        return False   # neither side qualifies yet
+        winner = determine_winner(up_ask, dn_ask, threshold=FINAL_10S_THRESHOLD)
+
+    if winner is None:
+        return False
 
     winner_ask = up_ask if winner == "up" else dn_ask
-    print(f"⏱️  LAST 10s — {side_s(winner, f'{winner.upper()} @ {winner_ask:.4f}')} >= 0.80 → settling all at $1/$0")
+    label = "EXPIRY" if now_expired else f"LAST 10s ({winner_ask:.4f} >= {FINAL_10S_THRESHOLD})"
+    print(f"⏱️  {label} — {side_s(winner, winner.upper())} wins → settling all at $1/$0")
+
     if state.cheap_shares > 0 and not state.cheap_done:
         settle_side_at_dollar(state, state.cheap_side, winner)
     if state.second_triggered and state.strong_shares > 0 and not state.strong_done:
@@ -325,9 +346,7 @@ async def main():
                         continue
 
                 if state.trade_window and now >= state.trade_window + 300:
-                    await sell_position(state, session, state.cheap_side, reason="EXPIRY")
-                    state.phase = "done"
-                    save_state(state)
+                    await check_final_10s(state, session, up_ask, dn_ask)
                     await asyncio.sleep(POLL_INTERVAL)
                     continue
                 cheap_ask = up_ask if state.cheap_side == "up" else dn_ask
@@ -383,21 +402,19 @@ async def main():
                           f"{side_s(state.strong_side, f'{state.strong_side.upper()} {strong_ask:.4f}')} ({su:+.2f}) "
                           f"| TP @ {TP} | Real-time Capital {cap(rc)}")
 
-                # cheap side TP or expiry
-                if not state.cheap_done and state.cheap_shares > 0:
-                    if cheap_ask >= TP:
-                        print(f"🎯 TP — {side_s(state.cheap_side, state.cheap_side.upper())} hit {cheap_ask:.4f}!")
-                        await sell_position(state, session, state.cheap_side, reason="TP")
-                    elif expired:
-                        await sell_position(state, session, state.cheap_side, reason="EXPIRY")
+                # cheap side TP
+                if not state.cheap_done and state.cheap_shares > 0 and cheap_ask >= TP:
+                    print(f"🎯 TP — {side_s(state.cheap_side, state.cheap_side.upper())} hit {cheap_ask:.4f}!")
+                    await sell_position(state, session, state.cheap_side, reason="TP")
 
-                # strong side TP or expiry
-                if not state.strong_done and state.strong_shares > 0:
-                    if strong_ask >= TP:
-                        print(f"🎯 TP — {side_s(state.strong_side, state.strong_side.upper())} hit {strong_ask:.4f}!")
-                        await sell_position(state, session, state.strong_side, reason="TP")
-                    elif expired:
-                        await sell_position(state, session, state.strong_side, reason="EXPIRY")
+                # strong side TP
+                if not state.strong_done and state.strong_shares > 0 and strong_ask >= TP:
+                    print(f"🎯 TP — {side_s(state.strong_side, state.strong_side.upper())} hit {strong_ask:.4f}!")
+                    await sell_position(state, session, state.strong_side, reason="TP")
+
+                # expiry: settle remaining at $1/$0 by winner price
+                if expired:
+                    await check_final_10s(state, session, up_ask, dn_ask)
 
                 if all_done(state):
                     state.phase = "done"
