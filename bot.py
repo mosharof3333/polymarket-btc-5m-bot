@@ -7,8 +7,8 @@ import os
 STATE_FILE      = "bot_state.json"
 TRIGGER         = 0.80    # when one side hits this, buy the OPPOSITE (cheap) side
 SECOND_TRIGGER  = 0.90    # if strong side goes even higher, double down on cheap side
-FIRST_BET       = 50.0    # $ for first contrarian entry
-SECOND_BET      = 300.0   # $ for double-down if strong side keeps rising
+FIRST_BET       = 20.0    # $ for first contrarian entry
+SECOND_BET      = 20.0   # $ for double-down if strong side keeps rising
 TP              = 0.99    # take profit on cheap side (full reversal)
 POLL_INTERVAL   = 0.15
 CLOB_BASE       = "https://clob.polymarket.com"
