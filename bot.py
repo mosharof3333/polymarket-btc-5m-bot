@@ -52,11 +52,11 @@ class BotState:
         self.poll_count       = 0
 
         # ── cumulative stats (never reset between windows) ──
-        self.stat_first_tp          = 0   # first buy hit TP
-        self.stat_first_no_tp       = 0   # first buy expired without TP
+        self.stat_first_win          = 0   # first buy hit TP
+        self.stat_first_loss       = 0   # first buy expired without TP
         self.stat_second_triggered  = 0   # times second buy fired
-        self.stat_second_tp         = 0   # second buy hit TP
-        self.stat_second_no_tp      = 0   # second buy expired without TP
+        self.stat_second_win         = 0   # second buy hit TP
+        self.stat_second_loss      = 0   # second buy expired without TP
 
         # current-round exit flags (reset each window)
         self.cheap_exited_tp  = False
@@ -82,11 +82,11 @@ def load_state():
         s.strong_done      = d.get("strong_done", False)
         s.second_triggered      = d.get("second_triggered", False)
         s.completed_window      = d.get("completed_window")
-        s.stat_first_tp         = d.get("stat_first_tp", 0)
-        s.stat_first_no_tp      = d.get("stat_first_no_tp", 0)
+        s.stat_first_win         = d.get("stat_first_win", 0)
+        s.stat_first_loss      = d.get("stat_first_loss", 0)
         s.stat_second_triggered = d.get("stat_second_triggered", 0)
-        s.stat_second_tp        = d.get("stat_second_tp", 0)
-        s.stat_second_no_tp     = d.get("stat_second_no_tp", 0)
+        s.stat_second_win        = d.get("stat_second_win", 0)
+        s.stat_second_loss     = d.get("stat_second_loss", 0)
         s.cheap_exited_tp       = d.get("cheap_exited_tp", False)
         s.strong_exited_tp      = d.get("strong_exited_tp", False)
         return s
@@ -110,11 +110,11 @@ def save_state(s):
             "strong_done":      s.strong_done,
             "second_triggered":      s.second_triggered,
             "completed_window":      s.completed_window,
-            "stat_first_tp":         s.stat_first_tp,
-            "stat_first_no_tp":      s.stat_first_no_tp,
+            "stat_first_win":         s.stat_first_win,
+            "stat_first_loss":      s.stat_first_loss,
             "stat_second_triggered": s.stat_second_triggered,
-            "stat_second_tp":        s.stat_second_tp,
-            "stat_second_no_tp":     s.stat_second_no_tp,
+            "stat_second_win":        s.stat_second_win,
+            "stat_second_loss":     s.stat_second_loss,
             "cheap_exited_tp":       s.cheap_exited_tp,
             "strong_exited_tp":      s.strong_exited_tp,
         }, f, indent=2)
@@ -231,8 +231,12 @@ async def check_final_10s(state, session, up_ask, dn_ask):
 
     if state.cheap_shares > 0 and not state.cheap_done:
         settle_side_at_dollar(state, state.cheap_side, winner)
+        if state.cheap_side == winner:
+            state.cheap_exited_tp = True   # cheap side won — count as win
     if state.second_triggered and state.strong_shares > 0 and not state.strong_done:
         settle_side_at_dollar(state, state.strong_side, winner)
+        if state.strong_side == winner:
+            state.strong_exited_tp = True  # strong side won — count as win
     state.phase = "done"
     save_state(state)
     return True
@@ -276,17 +280,17 @@ async def sell_position(state, session, side, reason="TP"):
     save_state(state)
 
 def print_stats(state):
-    f_total  = state.stat_first_tp  + state.stat_first_no_tp
-    f_rate   = f"{state.stat_first_tp/f_total*100:.0f}%" if f_total else "n/a"
-    s_total  = state.stat_second_tp + state.stat_second_no_tp
-    s_rate   = f"{state.stat_second_tp/s_total*100:.0f}%" if s_total else "n/a"
+    f_total  = state.stat_first_win  + state.stat_first_loss
+    f_rate   = f"{state.stat_first_win/f_total*100:.0f}%" if f_total else "n/a"
+    s_total  = state.stat_second_win + state.stat_second_loss
+    s_rate   = f"{state.stat_second_win/s_total*100:.0f}%" if s_total else "n/a"
     print(f"📈 STATS ─────────────────────────────────────────")
     print(f"   First buy  (${FIRST_BET} @ 0.20):  "
-          f"TP {state.stat_first_tp}x | No-TP {state.stat_first_no_tp}x | "
+          f"Win {state.stat_first_win}x | Loss {state.stat_first_loss}x | "
           f"Win rate {f_rate} of {f_total} trades")
     print(f"   Second buy (${SECOND_BET} @ 0.90):  "
           f"triggered {state.stat_second_triggered}x | "
-          f"TP {state.stat_second_tp}x | No-TP {state.stat_second_no_tp}x | "
+          f"Win {state.stat_second_win}x | Loss {state.stat_second_loss}x | "
           f"Win rate {s_rate} of {s_total} trades")
     print(f"──────────────────────────────────────────────────")
 
@@ -471,14 +475,14 @@ async def main():
                 # record stats for this round
                 if state.cheap_side is not None:
                     if state.cheap_exited_tp:
-                        state.stat_first_tp     += 1
+                        state.stat_first_win     += 1
                     else:
-                        state.stat_first_no_tp  += 1
+                        state.stat_first_loss  += 1
                 if state.second_triggered:
                     if state.strong_exited_tp:
-                        state.stat_second_tp    += 1
+                        state.stat_second_win    += 1
                     else:
-                        state.stat_second_no_tp += 1
+                        state.stat_second_loss += 1
 
                 print(f"✔️  Round complete | Capital {cap(state.capital)}")
                 print_stats(state)
