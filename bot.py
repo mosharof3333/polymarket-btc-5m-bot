@@ -101,7 +101,9 @@ async def fetch_gamma(session, slug):
             f"https://gamma-api.polymarket.com/events?slug={slug}", timeout=3
         ) as r:
             if r.status == 200:
-                return await r.json()
+                data = await r.json()
+                if isinstance(data, list) and len(data) > 0:
+                    return data
     except:
         pass
     return None
@@ -179,7 +181,8 @@ async def check_final_10s(state, session, up_ask, dn_ask):
     else:
         return False   # neither side qualifies yet
 
-    print(f"⏱️  LAST 10s — {side_s(winner, f'{winner.upper()} @ {up_ask if winner==\"up\" else dn_ask:.4f}')} >= 0.80 → settling all at $1/$0")
+    winner_ask = up_ask if winner == "up" else dn_ask
+    print(f"⏱️  LAST 10s — {side_s(winner, f'{winner.upper()} @ {winner_ask:.4f}')} >= 0.80 → settling all at $1/$0")
     if state.cheap_shares > 0 and not state.cheap_done:
         settle_side_at_dollar(state, state.cheap_side, winner)
     if state.second_triggered and state.strong_shares > 0 and not state.strong_done:
@@ -242,6 +245,7 @@ async def main():
 
     async with aiohttp.ClientSession() as session:
         while True:
+          try:
             now            = int(time.time())
             current_window = (now // 300) * 300
             secs_elapsed   = now - current_window
@@ -414,6 +418,10 @@ async def main():
                 state.phase            = "waiting"
                 save_state(state)
 
+            await asyncio.sleep(POLL_INTERVAL)
+
+          except Exception as e:
+            print(f"⚠️  ERROR (phase={state.phase}): {e} — continuing")
             await asyncio.sleep(POLL_INTERVAL)
 
 if __name__ == "__main__":
