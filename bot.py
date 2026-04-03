@@ -13,7 +13,7 @@ TP                   = 0.99   # take profit for both positions
 POLL_INTERVAL        = 0.05   # poll every 50ms for fast price detection
 FINAL_10S_THRESHOLD  = 0.55   # settle at $1/$0 if any side crosses this in last 10s
 CLOB_BASE            = "https://clob.polymarket.com"
-PRINT_EVERY          = 60     # ~3s at 50ms polling
+PRINT_EVERY          = 20     # ~1s at 50ms polling
 
 GREEN      = "\033[32m"
 RED        = "\033[31m"
