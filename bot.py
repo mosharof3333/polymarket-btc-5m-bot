@@ -4,20 +4,19 @@ import json
 import time
 import os
 
-STATE_FILE      = "bot_state.json"
-TRIGGER         = 0.80    # when one side hits this, buy the OPPOSITE (cheap) side
-SECOND_TRIGGER  = 0.90    # if strong side goes even higher, double down on cheap side
-FIRST_BET       = 20.0    # $ for first contrarian entry
-SECOND_BET      = 20.0   # $ for double-down if strong side keeps rising
-TP              = 0.99    # take profit on cheap side (full reversal)
-POLL_INTERVAL   = 0.15
-CLOB_BASE       = "https://clob.polymarket.com"
-PRINT_EVERY     = 20
+STATE_FILE           = "bot_state.json"
+TRIGGER_CHEAP        = 0.20   # buy whichever side hits this first
+SECOND_TRIGGER_CHEAP = 0.10   # if cheap side drops here, also buy the strong side
+FIRST_BET            = 10.0   # $ on cheap side at 0.20
+SECOND_BET           = 100.0  # $ on strong side at ~0.90
+TP                   = 0.99   # take profit for both positions
+POLL_INTERVAL        = 0.15
+CLOB_BASE            = "https://clob.polymarket.com"
+PRINT_EVERY          = 20
 
 GREEN      = "\033[32m"
 RED        = "\033[31m"
 BOLD_GREEN = "\033[1;32m"
-YELLOW     = "\033[33m"
 RESET      = "\033[0m"
 
 def cap(v):          return f"{BOLD_GREEN}${v:.2f}{RESET}"
@@ -33,18 +32,19 @@ class BotState:
         self.up_token         = None
         self.down_token       = None
         self.trade_window     = None
-        # phase: waiting / watching / contrarian / done
-        self.phase            = "waiting"
+        self.phase            = "waiting"  # waiting / watching / first_active / both_active / done
 
-        # which side is STRONG (hit trigger), we bet the OPPOSITE
-        self.strong_side      = None    # "up" or "down"
-        self.cheap_side       = None    # "up" or "down" — the one we're buying
+        # first position: the cheap side that hit 0.20
+        self.cheap_side       = None       # "up" or "down"
+        self.cheap_shares     = 0.0
+        self.cheap_cost       = 0.0
+        self.cheap_done       = False
 
-        # our position on the cheap side
-        self.shares           = 0.0
-        self.cost             = 0.0
-
-        # second trigger
+        # second position: the strong (opposite) side bought at ~0.90
+        self.strong_side      = None       # "up" or "down"
+        self.strong_shares    = 0.0
+        self.strong_cost      = 0.0
+        self.strong_done      = False
         self.second_triggered = False
 
         self.completed_window = None
@@ -60,10 +60,14 @@ def load_state():
         s.down_token       = d.get("down_token")
         s.trade_window     = d.get("trade_window")
         s.phase            = d.get("phase", "waiting")
-        s.strong_side      = d.get("strong_side")
         s.cheap_side       = d.get("cheap_side")
-        s.shares           = d.get("shares", 0.0)
-        s.cost             = d.get("cost", 0.0)
+        s.cheap_shares     = d.get("cheap_shares", 0.0)
+        s.cheap_cost       = d.get("cheap_cost", 0.0)
+        s.cheap_done       = d.get("cheap_done", False)
+        s.strong_side      = d.get("strong_side")
+        s.strong_shares    = d.get("strong_shares", 0.0)
+        s.strong_cost      = d.get("strong_cost", 0.0)
+        s.strong_done      = d.get("strong_done", False)
         s.second_triggered = d.get("second_triggered", False)
         s.completed_window = d.get("completed_window")
         return s
@@ -77,10 +81,14 @@ def save_state(s):
             "down_token":       s.down_token,
             "trade_window":     s.trade_window,
             "phase":            s.phase,
-            "strong_side":      s.strong_side,
             "cheap_side":       s.cheap_side,
-            "shares":           round(s.shares, 6),
-            "cost":             round(s.cost, 4),
+            "cheap_shares":     round(s.cheap_shares, 6),
+            "cheap_cost":       round(s.cheap_cost, 4),
+            "cheap_done":       s.cheap_done,
+            "strong_side":      s.strong_side,
+            "strong_shares":    round(s.strong_shares, 6),
+            "strong_cost":      round(s.strong_cost, 4),
+            "strong_done":      s.strong_done,
             "second_triggered": s.second_triggered,
             "completed_window": s.completed_window,
         }, f, indent=2)
@@ -129,49 +137,62 @@ def get_tokens(market):
     ids = json.loads(ids) if isinstance(ids, str) else ids
     return (ids[0] if ids else None, ids[1] if len(ids) > 1 else None)
 
-def cheap_token(state):
-    return state.up_token if state.cheap_side == "up" else state.down_token
-
-def strong_token(state):
-    return state.up_token if state.strong_side == "up" else state.down_token
+def token_for(state, side):
+    return state.up_token if side == "up" else state.down_token
 
 # ── trade helpers ─────────────────────────────────────────────────────────────
 
-async def buy_cheap(state, session, bet, cheap_ask, label=""):
-    shares = bet / cheap_ask
+async def buy_position(state, session, side, bet, ask, label=""):
+    shares = bet / ask
     state.capital -= bet
-    state.shares  += shares
-    state.cost    += bet
-    avg = state.cost / state.shares
-    print(f"🛒 BUY {side_s(state.cheap_side, f'{state.cheap_side.upper()} @ {cheap_ask:.4f}')} "
-          f"{label}| ${bet:.2f} → {shares:.4f} shares "
-          f"| total {state.shares:.4f} @ avg {avg:.4f} "
-          f"| TP @ {TP} | Capital {cap(state.capital)}")
+    if side == state.cheap_side:
+        state.cheap_shares += shares
+        state.cheap_cost   += bet
+    else:
+        state.strong_shares += shares
+        state.strong_cost   += bet
+    print(f"🛒 BUY {side_s(side, f'{side.upper()} @ {ask:.4f}')} {label}"
+          f"| ${bet:.2f} → {shares:.4f} shares | TP @ {TP} | Capital {cap(state.capital)}")
     save_state(state)
 
-async def sell_cheap(state, session, reason="TP"):
-    if state.shares <= 0:
+async def sell_position(state, session, side, reason="TP"):
+    if side == state.cheap_side:
+        shares = state.cheap_shares
+        cost   = state.cheap_cost
+    else:
+        shares = state.strong_shares
+        cost   = state.strong_cost
+    if shares <= 0:
         return
-    bid      = await get_best_bid(session, cheap_token(state))
-    proceeds = state.shares * bid
-    net      = proceeds - state.cost
+    bid      = await get_best_bid(session, token_for(state, side))
+    proceeds = shares * bid
+    net      = proceeds - cost
     state.capital += proceeds   # cost already deducted at buy time
-    pnl = f"+${net:.2f}" if net >= 0 else f"-${abs(net):.2f}"
+    pnl  = f"+${net:.2f}" if net >= 0 else f"-${abs(net):.2f}"
     icon = "🎯" if reason == "TP" else "⏰"
-    print(f"{icon} {reason} — sell "
-          f"{side_s(state.cheap_side, f'{state.cheap_side.upper()} {state.shares:.4f} @ {bid:.4f}')} "
-          f"| proceeds ${proceeds:.2f} | cost ${state.cost:.2f} | net {pnl} | Capital {cap(state.capital)}")
-    state.shares = state.cost = 0.0
-    state.phase  = "done"
+    print(f"{icon} {reason} — sell {side_s(side, f'{side.upper()} {shares:.4f} @ {bid:.4f}')} "
+          f"| proceeds ${proceeds:.2f} | cost ${cost:.2f} | net {pnl} | Capital {cap(state.capital)}")
+    if side == state.cheap_side:
+        state.cheap_shares = state.cheap_cost = 0.0
+        state.cheap_done   = True
+    else:
+        state.strong_shares = state.strong_cost = 0.0
+        state.strong_done   = True
     save_state(state)
+
+def all_done(state):
+    cheap_closed  = state.cheap_done  or state.cheap_shares  == 0
+    strong_closed = not state.second_triggered or state.strong_done or state.strong_shares == 0
+    return cheap_closed and strong_closed
 
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def main():
     state = load_state()
-    print(f"🚀 BTC 5m Contrarian Bot | Capital {cap(state.capital)} | Phase: {state.phase}")
-    print(f"   Strategy: when one side hits {TRIGGER}, BUY THE OPPOSITE")
-    print(f"   First bet ${FIRST_BET} | Double-down ${SECOND_BET} at {SECOND_TRIGGER} | TP @ {TP}")
+    print(f"🚀 BTC 5m Bot | Capital {cap(state.capital)} | Phase: {state.phase}")
+    print(f"   First: whichever side hits {TRIGGER_CHEAP} → buy ${FIRST_BET}")
+    print(f"   Second: if that side drops to {SECOND_TRIGGER_CHEAP} → buy opposite ${SECOND_BET}")
+    print(f"   TP @ {TP} for both | no stop loss")
 
     async with aiohttp.ClientSession() as session:
         while True:
@@ -197,14 +218,14 @@ async def main():
                         state.up_token        = up_tok
                         state.down_token      = dn_tok
                         state.trade_window    = current_window
-                        state.strong_side     = None
-                        state.cheap_side      = None
-                        state.shares          = 0.0
-                        state.cost            = 0.0
+                        state.cheap_side      = state.strong_side = None
+                        state.cheap_shares    = state.cheap_cost  = 0.0
+                        state.strong_shares   = state.strong_cost = 0.0
+                        state.cheap_done      = state.strong_done = False
                         state.second_triggered = False
                         state.phase           = "watching"
                         save_state(state)
-                        print(f"🟢 WINDOW LIVE {slug} | watching for {up_s('UP')} or {dn_s('DN')} @ {TRIGGER} to fade | Capital {cap(state.capital)}")
+                        print(f"🟢 WINDOW LIVE {slug} | watching for first side to hit {TRIGGER_CHEAP} | Capital {cap(state.capital)}")
                 elif state.poll_count % PRINT_EVERY == 0:
                     print(f"⏳ waiting | T+{secs_elapsed}s | Capital {cap(state.capital)}")
 
@@ -212,8 +233,7 @@ async def main():
             elif state.phase == "watching":
                 if state.trade_window and now >= state.trade_window + 300:
                     print(f"⏰ EXPIRY — no trigger fired | Capital {cap(state.capital)}")
-                    state.phase           = "done"
-                    state.completed_window = state.trade_window
+                    state.phase = "done"
                     save_state(state)
                     await asyncio.sleep(POLL_INTERVAL)
                     continue
@@ -223,80 +243,114 @@ async def main():
 
                 if state.poll_count % PRINT_EVERY == 0:
                     print(f"👀 watching | {up_s(f'UP {up_ask:.4f}')}  {dn_s(f'DN {dn_ask:.4f}')} "
-                          f"| fade trigger @ {TRIGGER} | Capital {cap(state.capital)}")
+                          f"| buy trigger @ {TRIGGER_CHEAP} | Capital {cap(state.capital)}")
 
-                # UP is strong → buy DOWN (cheap)
-                if up_ask >= TRIGGER:
-                    state.strong_side = "up"
-                    state.cheap_side  = "down"
-                    cheap_ask = dn_ask
-                    print(f"📉 FADE — {up_s(f'UP hit {up_ask:.4f}')} → buying cheap {dn_s(f'DN @ {cheap_ask:.4f}')}")
-                    await buy_cheap(state, session, FIRST_BET, cheap_ask)
-                    state.phase = "contrarian"
-                    save_state(state)
-                    print(f"   If {up_s('UP')} hits {SECOND_TRIGGER}, double-down ${SECOND_BET} on {dn_s('DN')}")
-
-                # DOWN is strong → buy UP (cheap)
-                elif dn_ask >= TRIGGER:
-                    state.strong_side = "down"
+                if up_ask <= TRIGGER_CHEAP:
                     state.cheap_side  = "up"
-                    cheap_ask = up_ask
-                    print(f"📉 FADE — {dn_s(f'DN hit {dn_ask:.4f}')} → buying cheap {up_s(f'UP @ {cheap_ask:.4f}')}")
-                    await buy_cheap(state, session, FIRST_BET, cheap_ask)
-                    state.phase = "contrarian"
+                    state.strong_side = "down"
+                    print(f"🎯 TRIGGER — {up_s(f'UP hit {up_ask:.4f}')} (cheap) | buying ${FIRST_BET}")
+                    await buy_position(state, session, "up", FIRST_BET, up_ask)
+                    state.phase = "first_active"
                     save_state(state)
-                    print(f"   If {dn_s('DN')} hits {SECOND_TRIGGER}, double-down ${SECOND_BET} on {up_s('UP')}")
+                    print(f"   If {up_s('UP')} drops to {SECOND_TRIGGER_CHEAP}, will buy {dn_s('DN')} ${SECOND_BET} | TP @ {TP}")
 
-            # ── PHASE: contrarian ─────────────────────────────────────────
-            elif state.phase == "contrarian":
+                elif dn_ask <= TRIGGER_CHEAP:
+                    state.cheap_side  = "down"
+                    state.strong_side = "up"
+                    print(f"🎯 TRIGGER — {dn_s(f'DN hit {dn_ask:.4f}')} (cheap) | buying ${FIRST_BET}")
+                    await buy_position(state, session, "down", FIRST_BET, dn_ask)
+                    state.phase = "first_active"
+                    save_state(state)
+                    print(f"   If {dn_s('DN')} drops to {SECOND_TRIGGER_CHEAP}, will buy {up_s('UP')} ${SECOND_BET} | TP @ {TP}")
+
+            # ── PHASE: first_active ───────────────────────────────────────
+            elif state.phase == "first_active":
+                if state.trade_window and now >= state.trade_window + 300:
+                    await sell_position(state, session, state.cheap_side, reason="EXPIRY")
+                    state.phase = "done"
+                    save_state(state)
+                    await asyncio.sleep(POLL_INTERVAL)
+                    continue
+
+                up_ask    = await get_best_ask(session, state.up_token)
+                dn_ask    = await get_best_ask(session, state.down_token)
+                cheap_ask = up_ask if state.cheap_side == "up" else dn_ask
+                rc        = state.capital + state.cheap_shares * cheap_ask
+
+                if state.poll_count % PRINT_EVERY == 0:
+                    unreal = state.cheap_shares * cheap_ask - state.cheap_cost
+                    u_str  = f"+${unreal:.2f}" if unreal >= 0 else f"-${abs(unreal):.2f}"
+                    print(f"📊 {side_s(state.cheap_side, f'{state.cheap_side.upper()} {cheap_ask:.4f}')} "
+                          f"| {state.cheap_shares:.4f} shares | unrealized {u_str} "
+                          f"| TP @ {TP} | 2nd trigger @ {SECOND_TRIGGER_CHEAP} | Real-time Capital {cap(rc)}")
+
+                # TP on cheap side
+                if cheap_ask >= TP:
+                    print(f"🎯 TP — {side_s(state.cheap_side, state.cheap_side.upper())} hit {cheap_ask:.4f}!")
+                    await sell_position(state, session, state.cheap_side, reason="TP")
+                    state.phase = "done"
+                    save_state(state)
+
+                # Second trigger: cheap side dropped to 0.10 → buy strong side
+                elif cheap_ask <= SECOND_TRIGGER_CHEAP and not state.second_triggered:
+                    strong_ask = dn_ask if state.strong_side == "down" else up_ask
+                    print(f"📉 2ND TRIGGER — {side_s(state.cheap_side, f'{state.cheap_side.upper()} dropped to {cheap_ask:.4f}')} "
+                          f"| buying strong side {side_s(state.strong_side, f'{state.strong_side.upper()} @ {strong_ask:.4f}')} ${SECOND_BET}")
+                    await buy_position(state, session, state.strong_side, SECOND_BET, strong_ask)
+                    state.second_triggered = True
+                    state.phase = "both_active"
+                    save_state(state)
+
+            # ── PHASE: both_active ────────────────────────────────────────
+            elif state.phase == "both_active":
                 expired = state.trade_window and now >= state.trade_window + 300
 
                 up_ask     = await get_best_ask(session, state.up_token)
                 dn_ask     = await get_best_ask(session, state.down_token)
                 cheap_ask  = up_ask if state.cheap_side  == "up" else dn_ask
-                strong_ask = dn_ask if state.strong_side == "down" else up_ask
-
-                # real-time capital: cost already deducted, add current position value
-                rc = state.capital + state.shares * cheap_ask
+                strong_ask = up_ask if state.strong_side == "up" else dn_ask
+                rc = (state.capital
+                      + state.cheap_shares  * cheap_ask
+                      + state.strong_shares * strong_ask)
 
                 if state.poll_count % PRINT_EVERY == 0 and not expired:
-                    avg      = state.cost / state.shares if state.shares > 0 else 0
-                    unreal   = state.shares * cheap_ask - state.cost
-                    u_str    = f"+${unreal:.2f}" if unreal >= 0 else f"-${abs(unreal):.2f}"
-                    print(f"📊 contrarian | "
-                          f"{side_s(state.cheap_side,  f'{state.cheap_side.upper()}  {cheap_ask:.4f}')} "
-                          f"[{state.shares:.4f} shares, avg {avg:.4f}, {u_str}] | "
-                          f"{side_s(state.strong_side, f'{state.strong_side.upper()} {strong_ask:.4f}')} "
-                          f"{'(2nd trigger fired)' if state.second_triggered else f'(2nd trigger @ {SECOND_TRIGGER})'} | "
-                          f"Real-time Capital {cap(rc)}")
+                    cu = state.cheap_shares  * cheap_ask  - state.cheap_cost
+                    su = state.strong_shares * strong_ask - state.strong_cost
+                    print(f"📊 both open | "
+                          f"{side_s(state.cheap_side,  f'{state.cheap_side.upper()}  {cheap_ask:.4f}')} ({cu:+.2f})  "
+                          f"{side_s(state.strong_side, f'{state.strong_side.upper()} {strong_ask:.4f}')} ({su:+.2f}) "
+                          f"| TP @ {TP} | Real-time Capital {cap(rc)}")
 
-                # ── TAKE PROFIT ───────────────────────────────────────────
-                if cheap_ask >= TP:
-                    print(f"🎯 TP — cheap side {side_s(state.cheap_side, state.cheap_side.upper())} reversed to {cheap_ask:.4f}!")
-                    await sell_cheap(state, session, reason="TP")
+                # cheap side TP or expiry
+                if not state.cheap_done and state.cheap_shares > 0:
+                    if cheap_ask >= TP:
+                        print(f"🎯 TP — {side_s(state.cheap_side, state.cheap_side.upper())} hit {cheap_ask:.4f}!")
+                        await sell_position(state, session, state.cheap_side, reason="TP")
+                    elif expired:
+                        await sell_position(state, session, state.cheap_side, reason="EXPIRY")
 
-                # ── EXPIRY ────────────────────────────────────────────────
-                elif expired:
-                    print(f"⏰ EXPIRY — settling position")
-                    await sell_cheap(state, session, reason="EXPIRY")
+                # strong side TP or expiry
+                if not state.strong_done and state.strong_shares > 0:
+                    if strong_ask >= TP:
+                        print(f"🎯 TP — {side_s(state.strong_side, state.strong_side.upper())} hit {strong_ask:.4f}!")
+                        await sell_position(state, session, state.strong_side, reason="TP")
+                    elif expired:
+                        await sell_position(state, session, state.strong_side, reason="EXPIRY")
 
-                # ── DOUBLE DOWN: strong side goes even higher ──────────────
-                elif not state.second_triggered and strong_ask >= SECOND_TRIGGER:
-                    print(f"📉 DOUBLE DOWN — {side_s(state.strong_side, f'{state.strong_side.upper()} hit {strong_ask:.4f}')} "
-                          f"| cheap side {side_s(state.cheap_side, state.cheap_side.upper())} now even cheaper @ {cheap_ask:.4f}")
-                    await buy_cheap(state, session, SECOND_BET, cheap_ask,
-                                    label=f"(double-down ${SECOND_BET}) ")
-                    state.second_triggered = True
+                if all_done(state):
+                    state.phase = "done"
                     save_state(state)
 
             # ── PHASE: done ───────────────────────────────────────────────
             elif state.phase == "done":
                 print(f"✔️  Round complete | Capital {cap(state.capital)}")
                 state.completed_window = state.trade_window
-                state.up_token         = state.down_token = None
+                state.up_token         = state.down_token  = None
                 state.trade_window     = None
-                state.strong_side      = state.cheap_side = None
-                state.shares           = state.cost       = 0.0
+                state.cheap_side       = state.strong_side = None
+                state.cheap_shares     = state.cheap_cost  = 0.0
+                state.strong_shares    = state.strong_cost = 0.0
+                state.cheap_done       = state.strong_done = False
                 state.second_triggered = False
                 state.poll_count       = 0
                 state.phase            = "waiting"
