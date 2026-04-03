@@ -5,7 +5,7 @@ import time
 import os
 
 STATE_FILE           = "bot_state.json"
-TRIGGER_CHEAP        = 0.20   # buy whichever side hits this first
+TRIGGER_CHEAP        = 0.30   # buy whichever side hits this first
 SECOND_TRIGGER_STRONG = 0.90   # buy strong side when it reaches this price
 FIRST_BET            = 10.0   # $ on cheap side at 0.20
 SECOND_BET           = 150.0  # $ on strong side at ~0.90
