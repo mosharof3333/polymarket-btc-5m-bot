@@ -1,1 +1,2 @@
 aiohttp
+py-clob-client
