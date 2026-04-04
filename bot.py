@@ -6,11 +6,10 @@ import os
 
 STATE_FILE           = "bot_state.json"
 TRIGGER_CHEAP         = 0.30   # buy whichever side hits this first
-SL_CHEAP              = 0.07   # force sell first buy if price drops here
 SECOND_TRIGGER_STRONG = 0.90   # buy strong side when it reaches this price
 SL_STRONG             = 0.40   # force sell second buy if price drops here
-FIRST_BET            = 10.0   # $ on cheap side at 0.20
-SECOND_BET           = 150.0  # $ on strong side at ~0.90
+FIRST_BET            = 20.0   # $ on cheap side at 0.30
+SECOND_BET           = 200.0  # $ on strong side at ~0.90
 TP                   = 0.99   # take profit for both positions
 POLL_INTERVAL        = 0.05   # poll every 50ms for fast price detection
 FINAL_10S_THRESHOLD  = 0.55   # settle at $1/$0 if any side crosses this in last 10s
@@ -415,12 +414,6 @@ async def main():
                     state.phase = "done"
                     save_state(state)
 
-                # SL on cheap side
-                elif cheap_ask <= SL_CHEAP:
-                    print(f"🛑 SL — {side_s(state.cheap_side, f'{state.cheap_side.upper()} @ {cheap_ask:.4f}')} <= {SL_CHEAP} | force sell")
-                    await sell_position(state, session, state.cheap_side, reason="SL")
-                    state.phase = "done"
-                    save_state(state)
 
                 # Second trigger: strong side reached 0.90 → buy strong side
                 elif strong_ask >= SECOND_TRIGGER_STRONG and not state.second_triggered:
